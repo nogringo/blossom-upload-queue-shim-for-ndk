@@ -1,15 +1,29 @@
 name: blossom_upload_queue_shim_for_ndk
-description: A starting point for Dart libraries or applications.
-version: 1.0.0
-# repository: https://github.com/my_org/my_repo
+description: >-
+  Offline-first wrapper around the ndk package's Blossom upload use case.
+  Persists per-upload metadata to a sembast queue, reads blob bytes from a
+  blossom_cache, and retries until every targeted server has acknowledged
+  delivery.
+version: 0.1.0
+repository: https://github.com/nogringo/blossom-upload-queue-shim-for-ndk
+issue_tracker: https://github.com/nogringo/blossom-upload-queue-shim-for-ndk/issues
+
+topics:
+  - nostr
+  - ndk
+  - blossom
+  - offline-first
+  - queue
 
 environment:
   sdk: ^3.11.5
 
-# Add regular dependencies here.
 dependencies:
-  # path: ^1.9.0
+  blossom_cache: ^0.1.0
+  ndk: ^0.8.3
+  sembast: ^3.8.7
 
 dev_dependencies:
+  idb_shim: ^2.9.2
   lints: ^6.0.0
   test: ^1.25.6

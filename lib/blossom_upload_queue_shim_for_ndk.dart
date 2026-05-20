@@ -1,8 +1,12 @@
-/// Support for doing something awesome.
+/// Offline-first shim around the [ndk](https://pub.dev/packages/ndk) package's
+/// Blossom upload use case.
 ///
-/// More dartdocs go here.
+/// Use [OfflineBlossomUpload.withNdk] to wrap an existing `Ndk` instance,
+/// persist per-upload metadata in a sembast database, read blob bytes from a
+/// `BlossomCache`, and retry until every targeted server has acknowledged
+/// each blob.
 library;
 
-export 'src/blossom_upload_queue_shim_for_ndk_base.dart';
-
-// TODO: Export any libraries intended for clients of this package.
+export 'src/offline_blossom_upload.dart'
+    show BlobUploadFn, OfflineBlossomUpload;
+export 'src/queued_blob_upload.dart' show BlobUploadStatus, QueuedBlobUpload;
