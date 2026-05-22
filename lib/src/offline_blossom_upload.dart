@@ -15,10 +15,14 @@ import 'queued_blob_upload.dart';
 /// `Ndk.blossom.uploadBlob` with `serverUrls` always provided. The shim always
 /// uses [UploadStrategy.allSimultaneous] under the hood and never asks for
 /// server-side media optimisation (which would alter the resulting sha256).
+///
+/// [precomputedSha256] is the hex sha256 of [data]; the shim already knows it
+/// (it is the queue key) so it forwards it on every attempt to skip re-hashing.
 typedef BlobUploadFn =
     Future<List<BlobUploadResult>> Function({
       required Uint8List data,
       required List<String> serverUrls,
+      required String precomputedSha256,
       String? contentType,
     });
 
@@ -139,12 +143,14 @@ class OfflineBlossomUpload {
           ({
             required Uint8List data,
             required List<String> serverUrls,
+            required String precomputedSha256,
             String? contentType,
           }) => ndk.blossom.uploadBlob(
             data: data,
             serverUrls: serverUrls,
             contentType: contentType,
             strategy: UploadStrategy.allSimultaneous,
+            precomputedSha256: precomputedSha256,
           ),
       cache: cache,
       db: db,
@@ -420,6 +426,7 @@ class OfflineBlossomUpload {
         results = await _uploadFn(
           data: bytes,
           serverUrls: targets,
+          precomputedSha256: sha256,
           contentType: record.contentType,
         ).timeout(_perAttemptTimeout, onTimeout: () => const []);
       } catch (e) {

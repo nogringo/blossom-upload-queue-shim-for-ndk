@@ -188,9 +188,16 @@ OfflineBlossomUpload.withNdk(
 
 ```dart
 final outbox = OfflineBlossomUpload(
-  uploadFn: ({required data, required serverUrls, contentType}) async => [
-    for (final s in serverUrls) BlobUploadResult(serverUrl: s, success: true),
-  ],
+  uploadFn:
+      ({
+        required data,
+        required serverUrls,
+        required precomputedSha256,
+        contentType,
+      }) async => [
+        for (final s in serverUrls)
+          BlobUploadResult(serverUrl: s, success: true),
+      ],
   cache: await IdbBlossomCache.open(factory: newIdbFactoryMemory()),
   db: await newDatabaseFactoryMemory().openDatabase('test.db'),
 );

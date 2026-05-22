@@ -1,3 +1,12 @@
+## 0.2.0
+
+- Bump `ndk` to `^0.8.4-dev.1` and forward the queue's sha256 to
+  `ndk.blossom.uploadBlob` via the new `precomputedSha256` parameter, so
+  each retry skips re-hashing the blob bytes.
+- **Breaking:** `BlobUploadFn` gains a `required String precomputedSha256`
+  named parameter. Custom implementations passed via the default
+  constructor must accept it.
+
 ## 0.1.0
 
 - Initial release.

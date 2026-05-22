@@ -21,18 +21,27 @@ class FakeUploader {
   /// Throws on every call until cleared.
   Object? syncError;
 
-  final List<({Uint8List data, List<String> servers, String? contentType})>
+  final List<
+    ({
+      Uint8List data,
+      List<String> servers,
+      String precomputedSha256,
+      String? contentType,
+    })
+  >
   calls = [];
 
   BlobUploadFn get fn =>
       ({
         required Uint8List data,
         required List<String> serverUrls,
+        required String precomputedSha256,
         String? contentType,
       }) async {
         calls.add((
           data: data,
           servers: List.of(serverUrls),
+          precomputedSha256: precomputedSha256,
           contentType: contentType,
         ));
         if (syncError != null) throw syncError!;
