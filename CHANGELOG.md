@@ -1,3 +1,15 @@
+## 0.4.0
+
+- **Breaking (transitive on-disk):** Bump `blossom_cache` to `^0.3.0`. The
+  cache database schema is bumped to version 2, so any cache written by
+  `blossom_cache` 0.2.0 or earlier is dropped on first open after the
+  upgrade. Queue records still in flight whose blob bytes lived only in the
+  dropped cache will fail to retry. The `BlossomCache` API itself is
+  unchanged, so no source changes are required in callers of this shim.
+- `IdbBlossomCache.open()` now accepts a `chunkSize` parameter (default
+  1 MB) that fixes the Android `CursorWindow` ~2 MB row limit for large
+  blobs when backed by sqflite.
+
 ## 0.3.0
 
 - **Breaking:** Bump `blossom_cache` to `^0.2.0`. The cache's `put()` now
