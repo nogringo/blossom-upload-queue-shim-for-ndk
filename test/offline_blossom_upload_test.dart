@@ -88,7 +88,7 @@ void main() {
   setUp(() async {
     db = await newDatabaseFactoryMemory().openDatabase('test.db');
     cache = await _openCache();
-    await cache.put(_sha, _bytes(), type: 'image/png');
+    await cache.put(_bytes(), sha256: _sha, type: 'image/png');
   });
 
   tearDown(() async {

@@ -30,7 +30,7 @@ Future<void> main() async {
   //    `crypto.subtle.digest` on web).
   final bytes = Uint8List.fromList('hello blossom'.codeUnits);
   const sha = 'replace-with-the-real-sha256-hex';
-  await cache.put(sha, bytes, type: 'text/plain');
+  await cache.put(bytes, sha256: sha, type: 'text/plain');
 
   // 6. Schedule the upload. Returns as soon as the queue entry is persisted;
   //    delivery happens in the background and survives restarts.

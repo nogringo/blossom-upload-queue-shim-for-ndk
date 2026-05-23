@@ -1,3 +1,12 @@
+## 0.3.0
+
+- **Breaking:** Bump `blossom_cache` to `^0.2.0`. The cache's `put()` now
+  takes `bytes` positionally with `sha256` as a named argument
+  (`cache.put(bytes, sha256: sha, type: 'image/png')` instead of
+  `cache.put(sha, bytes, type: 'image/png')`). Callers that populate the
+  cache themselves before scheduling an upload must update those call
+  sites.
+
 ## 0.2.0
 
 - Bump `ndk` to `^0.8.4-dev.1` and forward the queue's sha256 to
