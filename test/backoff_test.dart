@@ -32,6 +32,18 @@ void main() {
       }
     });
 
+    test('does not overflow for very large attempt counts', () {
+      // On native platforms int is 64-bit; 100ms * 2^62 overflows.
+      final d = computeBackoff(
+        attempts: 100,
+        initial: const Duration(milliseconds: 100),
+        max: const Duration(seconds: 5),
+        random: Random(1),
+      );
+      expect(d.inMilliseconds, greaterThanOrEqualTo(100));
+      expect(d.inMilliseconds, lessThanOrEqualTo(5000));
+    });
+
     test('hits the max ceiling for large attempt counts', () {
       // With initial=1s, max=2s, attempts>=2 always saturates the cap.
       final d = computeBackoff(

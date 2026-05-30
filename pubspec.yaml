@@ -4,7 +4,7 @@ description: >-
   Persists per-upload metadata to a sembast queue, reads blob bytes from a
   blossom_cache, and retries until every targeted server has acknowledged
   delivery.
-version: 0.4.0
+version: 0.4.1
 repository: https://github.com/nogringo/blossom-upload-queue-shim-for-ndk
 issue_tracker: https://github.com/nogringo/blossom-upload-queue-shim-for-ndk/issues
 
