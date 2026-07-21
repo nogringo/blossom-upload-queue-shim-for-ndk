@@ -16,8 +16,16 @@ enum BlobUploadStatus {
 /// caller-provided `BlossomCache`, keyed by [sha256]; this record only holds
 /// the queue metadata.
 class QueuedBlobUpload {
-  /// The blob's sha256 (lowercase hex). Doubles as the sembast record key.
+  /// The blob's sha256 (lowercase hex).
   final String sha256;
+
+  /// Nostr pubkey (hex) this upload belongs to, or null when the entry is not
+  /// bound to an account. Part of the record key, so the same blob queued by
+  /// two accounts yields two independent entries.
+  ///
+  /// When non-null the shim signs every attempt with this account's signer,
+  /// not with whichever account happens to be logged in when the retry fires.
+  final String? pubkey;
 
   /// MIME type to forward to the Blossom server, if any. Looked up from the
   /// cache descriptor at `upload()` time when the caller does not provide one.
@@ -86,9 +94,19 @@ class QueuedBlobUpload {
     required this.nextAttemptAt,
     required this.deliveredAt,
     required this.createdAt,
+    this.pubkey,
     this.forcedServers,
     this.pinnedByShim = false,
   });
+
+  /// The sembast record key for this entry.
+  String get key => keyFor(sha256: sha256, pubkey: pubkey);
+
+  /// Builds the sembast record key for a (blob, account) pair: `pubkey|sha256`
+  /// when bound to an account, the bare sha256 otherwise. Account-less entries
+  /// keep their pre-0.5.0 key so existing databases keep working.
+  static String keyFor({required String sha256, String? pubkey}) =>
+      pubkey == null ? sha256 : '$pubkey|$sha256';
 
   /// `pending` while any server still owes an ack, otherwise `delivered`.
   BlobUploadStatus get status => deliveredAt != null
@@ -124,6 +142,7 @@ class QueuedBlobUpload {
   }) {
     return QueuedBlobUpload(
       sha256: sha256,
+      pubkey: pubkey,
       contentType: clearContentType ? null : (contentType ?? this.contentType),
       servers: servers ?? this.servers,
       ackedServers: ackedServers ?? this.ackedServers,
@@ -145,6 +164,7 @@ class QueuedBlobUpload {
   Map<String, dynamic> toMap() {
     return {
       'sha256': sha256,
+      'pubkey': pubkey,
       'contentType': contentType,
       'servers': servers,
       'ackedServers': ackedServers,
@@ -164,6 +184,7 @@ class QueuedBlobUpload {
   static QueuedBlobUpload fromMap(Map<String, dynamic> map) {
     return QueuedBlobUpload(
       sha256: map['sha256'] as String,
+      pubkey: map['pubkey'] as String?,
       contentType: map['contentType'] as String?,
       servers: (map['servers'] as List).cast<String>(),
       ackedServers: (map['ackedServers'] as List).cast<String>(),

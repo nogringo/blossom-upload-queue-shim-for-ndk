@@ -8,5 +8,5 @@
 library;
 
 export 'src/offline_blossom_upload.dart'
-    show BlobUploadFn, OfflineBlossomUpload;
+    show BlobUploadFn, CanSignForFn, OfflineBlossomUpload;
 export 'src/queued_blob_upload.dart' show BlobUploadStatus, QueuedBlobUpload;

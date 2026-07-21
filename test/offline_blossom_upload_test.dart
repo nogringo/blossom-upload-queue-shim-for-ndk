@@ -27,6 +27,7 @@ class FakeUploader {
       List<String> servers,
       String precomputedSha256,
       String? contentType,
+      String? pubkey,
     })
   >
   calls = [];
@@ -37,12 +38,14 @@ class FakeUploader {
         required List<String> serverUrls,
         required String precomputedSha256,
         String? contentType,
+        String? pubkey,
       }) async {
         calls.add((
           data: data,
           servers: List.of(serverUrls),
           precomputedSha256: precomputedSha256,
           contentType: contentType,
+          pubkey: pubkey,
         ));
         if (syncError != null) throw syncError!;
         final results = <BlobUploadResult>[];
@@ -71,10 +74,11 @@ Future<BlossomCache> _openCache() =>
 Future<QueuedBlobUpload> _waitFor(
   OfflineBlossomUpload outbox,
   String sha,
-  bool Function(QueuedBlobUpload r) predicate,
-) async {
+  bool Function(QueuedBlobUpload r) predicate, {
+  String? pubkey,
+}) async {
   for (var i = 0; i < 200; i++) {
-    final r = await outbox.get(sha);
+    final r = await outbox.get(sha, pubkey: pubkey);
     if (r != null && predicate(r)) return r;
     await Future.delayed(const Duration(milliseconds: 5));
   }
@@ -534,5 +538,366 @@ void main() {
     expect((await cache.head(_sha))!.pinned, isTrue);
 
     await outbox.dispose();
+  });
+
+  group('account binding', () {
+    const alice = 'alice-pubkey';
+    const bob = 'bob-pubkey';
+
+    test('pubkey is persisted and forwarded to the uploader', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      final delivered = await _waitFor(
+        outbox,
+        _sha,
+        (r) => r.status == BlobUploadStatus.delivered,
+        pubkey: alice,
+      );
+
+      expect(delivered.pubkey, alice);
+      expect(fake.calls.single.pubkey, alice);
+      expect(
+        await outbox.get(_sha),
+        isNull,
+        reason: 'the account-less key must stay free',
+      );
+
+      await outbox.dispose();
+    });
+
+    test('the same blob queued by two accounts yields two records', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a', 'https://b']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://b'],
+        pubkey: bob,
+      );
+
+      final all = await outbox.listAll();
+      expect(all.length, 2);
+      expect(
+        all.singleWhere((r) => r.pubkey == alice).servers,
+        const ['https://a'],
+        reason: 'bob must not widen alice\'s target list',
+      );
+      expect(all.singleWhere((r) => r.pubkey == bob).servers, const [
+        'https://b',
+      ]);
+
+      await outbox.dispose();
+    });
+
+    test('an entry whose account cannot sign is deferred untouched', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+        canSignFor: (pubkey) => pubkey == bob,
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.retryNow();
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      expect(fake.calls, isEmpty, reason: 'alice cannot sign right now');
+      final record = await outbox.get(_sha, pubkey: alice);
+      expect(record!.status, BlobUploadStatus.pending);
+      expect(
+        record.attempts,
+        0,
+        reason: 'deferring must not burn an attempt or arm the backoff',
+      );
+      expect(record.lastErrors, isEmpty);
+
+      await outbox.dispose();
+    });
+
+    test('a deferred entry resumes once its account can sign again', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      var loggedIn = false;
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+        canSignFor: (_) => loggedIn,
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.retryNow();
+      await Future.delayed(const Duration(milliseconds: 20));
+      expect(fake.calls, isEmpty);
+
+      loggedIn = true;
+      await outbox.retryNow();
+
+      final delivered = await _waitFor(
+        outbox,
+        _sha,
+        (r) => r.status == BlobUploadStatus.delivered,
+        pubkey: alice,
+      );
+      expect(delivered.attempts, 1, reason: 'the deferrals cost nothing');
+      expect(fake.calls.single.pubkey, alice);
+
+      await outbox.dispose();
+    });
+
+    test('an account-less entry is attempted without a signer check', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(milliseconds: 1),
+        canSignFor: (_) => false,
+      );
+
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await _waitFor(
+        outbox,
+        _sha,
+        (r) => r.status == BlobUploadStatus.delivered,
+      );
+      expect(fake.calls.single.pubkey, isNull);
+
+      await outbox.dispose();
+    });
+  });
+
+  group('local data clearing', () {
+    const alice = 'alice-pubkey';
+    const bob = 'bob-pubkey';
+
+    test('clearLocalAccountData only removes that account', () async {
+      final fake = FakeUploader();
+      fake.fail('https://a');
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(seconds: 30),
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: bob,
+      );
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+
+      await outbox.clearLocalAccountData(pubkey: alice);
+
+      expect(await outbox.get(_sha, pubkey: alice), isNull);
+      expect(await outbox.get(_sha, pubkey: bob), isNotNull);
+      expect(
+        await outbox.get(_sha),
+        isNotNull,
+        reason: 'account-less entries are not owned by any account',
+      );
+
+      await outbox.dispose();
+    });
+
+    test('clearing one account keeps the pin a sibling still needs', () async {
+      final fake = FakeUploader();
+      fake.fail('https://a');
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(seconds: 30),
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: bob,
+      );
+      expect((await cache.head(_sha))!.pinned, isTrue);
+      expect(
+        (await outbox.get(_sha, pubkey: bob))!.pinnedByShim,
+        isTrue,
+        reason: 'pin ownership is shared, not claimed by the first record only',
+      );
+
+      await outbox.clearLocalAccountData(pubkey: alice);
+      expect(
+        (await cache.head(_sha))!.pinned,
+        isTrue,
+        reason: 'bob still owes an upload',
+      );
+
+      await outbox.clearLocalAccountData(pubkey: bob);
+      expect((await cache.head(_sha))!.pinned, isFalse);
+
+      await outbox.dispose();
+    });
+
+    test(
+      'a delivered account does not unpin while another is pending',
+      () async {
+        final fake = FakeUploader();
+        fake.ackAll(['https://a']);
+        fake.fail('https://b');
+        final outbox = OfflineBlossomUpload(
+          uploadFn: fake.fn,
+          cache: cache,
+          db: db,
+          initialBackoff: const Duration(seconds: 30),
+        );
+
+        await outbox.upload(
+          sha256: _sha,
+          servers: const ['https://b'],
+          pubkey: bob,
+        );
+        await outbox.upload(
+          sha256: _sha,
+          servers: const ['https://a'],
+          pubkey: alice,
+        );
+
+        await _waitFor(
+          outbox,
+          _sha,
+          (r) => r.status == BlobUploadStatus.delivered,
+          pubkey: alice,
+        );
+        expect(
+          (await cache.head(_sha))!.pinned,
+          isTrue,
+          reason: 'bob would lose the bytes to eviction',
+        );
+
+        await outbox.dispose();
+      },
+    );
+
+    test('both clear methods are idempotent', () async {
+      final fake = FakeUploader();
+      fake.fail('https://a');
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(seconds: 30),
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+
+      await outbox.clearLocalAccountData(pubkey: alice);
+      await outbox.clearLocalAccountData(pubkey: alice);
+      await outbox.clearLocalAccountData(pubkey: 'never-seen-pubkey');
+      await outbox.clearAllLocalData();
+      await outbox.clearAllLocalData();
+
+      expect(await outbox.listAll(), isEmpty);
+      expect((await cache.head(_sha))!.pinned, isFalse);
+
+      await outbox.dispose();
+    });
+
+    test('clearAllLocalData empties the store and releases our pin', () async {
+      final fake = FakeUploader();
+      fake.fail('https://a');
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(seconds: 30),
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+
+      await outbox.clearAllLocalData();
+
+      expect(await outbox.listAll(), isEmpty);
+      expect((await cache.head(_sha))!.pinned, isFalse);
+      expect(
+        await cache.get(_sha),
+        isNotNull,
+        reason: 'blob bytes belong to the caller, not to the shim',
+      );
+
+      await outbox.dispose();
+    });
+
+    test('clearAllLocalData leaves a caller-owned pin alone', () async {
+      await cache.pin(_sha);
+
+      final fake = FakeUploader();
+      fake.fail('https://a');
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        db: db,
+        initialBackoff: const Duration(seconds: 30),
+      );
+
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.clearAllLocalData();
+
+      expect((await cache.head(_sha))!.pinned, isTrue);
+
+      await outbox.dispose();
+    });
   });
 }

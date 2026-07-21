@@ -1,3 +1,27 @@
+## 0.5.0
+
+- **Breaking:** `BlobUploadFn` gains a `String? pubkey` named parameter.
+  Custom `uploadFn` implementations must accept it and sign with that account.
+  `OfflineBlossomUpload.withNdk` is unaffected.
+- Add an optional `pubkey` to `upload()`, binding the entry to a nostr account.
+  Records are then keyed by `(pubkey, sha256)` instead of `sha256` alone, so
+  the same blob queued by two accounts yields two independent entries.
+  Account-less entries keep the bare `sha256` key, so existing databases keep
+  working without migration. `get()`, `watch()`, `watchPending()` and
+  `reupload()` gain a matching optional `pubkey`.
+- Account-bound entries are signed by their own account on every attempt, via
+  NDK's `customSigner`, rather than by whichever account is logged in when the
+  retry fires.
+- Add `canSignFor`, and wire it in `withNdk`. An entry whose account can no
+  longer sign (logged out, or read-only) is deferred untouched instead of being
+  uploaded under the throwaway keypair NDK silently falls back to.
+- Add `clearLocalAccountData(pubkey:)` and `clearAllLocalData()`. Blob bytes
+  are left in the cache; only shim-owned pins are released.
+- Fix pin ownership across accounts. The cache pin is a per-blob boolean while
+  records are now per `(pubkey, sha256)`, so ownership is shared: the pin is
+  released only once every record for that blob is delivered or deleted. One
+  account finishing no longer exposes another's pending bytes to eviction.
+
 ## 0.4.1
 
 - Fix `int64` overflow in `computeBackoff` on native platforms (Android, iOS,

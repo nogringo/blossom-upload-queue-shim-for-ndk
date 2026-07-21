@@ -68,7 +68,7 @@ Future<void> main() async {
 
 ## Semantics
 
-### `upload(sha256:, servers:, contentType:)`
+### `upload(sha256:, servers:, contentType:, pubkey:)`
 
 Persists a queue entry for the blob identified by `sha256` and schedules an
 immediate attempt to push it to every URL in `servers`. The blob bytes must
@@ -77,12 +77,16 @@ looks them up via `cache.head(sha256)` and throws `StateError` if absent. The
 `servers` list is **required**; no automatic server-list lookup is performed.
 URLs are normalized (lowercased, trailing `/` stripped) before storage.
 
-If a record with the same `sha256` already exists, the server lists are
-merged. `deliveredAt` is preserved if every server in the merged list is
-already in the entry's ack set; otherwise the entry is demoted to pending so
+If a record with the same `sha256` **and** `pubkey` already exists, the server
+lists are merged. `deliveredAt` is preserved if every server in the merged list
+is already in the entry's ack set; otherwise the entry is demoted to pending so
 the missing servers get pushed.
 
 If no `contentType` is provided, the shim reads it from the cache descriptor.
+
+`pubkey` is optional and binds the entry to a nostr account: see
+[Account binding](#account-binding). Leave it out and the entry behaves exactly
+as it did before 0.5.0.
 
 ### `retryNow()`
 
@@ -114,7 +118,7 @@ OfflineBlossomUpload(
 If you don't pass anything, the shim assumes it is always online and the
 periodic timer runs unconditionally.
 
-### `reupload(sha256, {String? server})`
+### `reupload(sha256, {String? server, String? pubkey})`
 
 `ackedServers` and `deliveredAt` are monotonic. `reupload` never rewrites the
 past; it queues a one-shot push via a transient `forcedServers` override that
@@ -128,6 +132,34 @@ the next attempt consumes.
   to the entry, it joins the target list and the entry is demoted to pending
   until `s` acks. If `s` was already there, the historical state is preserved.
 
+`pubkey` must match the one the entry was queued with.
+
+### Account binding
+
+Pass `pubkey` to `upload()` to bind an entry to a nostr account:
+
+- Records are keyed by `(pubkey, sha256)`, so the same blob queued by two
+  accounts yields two independent entries. Account-less entries keep the bare
+  `sha256` key, so existing databases keep working. `get()`, `watch()` and
+  `reupload()` take an optional `pubkey`, `watchPending()` too.
+- Every attempt is signed by that account, passed to NDK as `customSigner`,
+  which wins over the logged-in one. A retry firing hours later still uploads
+  under the queueing identity.
+- If that account can no longer sign (logged out, or read-only), the entry is
+  deferred untouched rather than misattributed: handed no usable signer, NDK
+  silently falls back to a throwaway keypair.
+
+With your own `uploadFn`, it receives the entry's `pubkey` and must sign with
+it; pass `canSignFor` to get the deferral.
+
+### Clearing local data
+
+- `clearLocalAccountData(pubkey:)` deletes every record bound to that account,
+  delivered or not. Other accounts and account-less records are untouched.
+- `clearAllLocalData()` deletes every record.
+
+Blob bytes stay in the cache either way; only shim-owned pins are released.
+
 ### Pin ownership
 
 The shim pins the blob in the `BlossomCache` when it takes ownership of an
@@ -136,6 +168,11 @@ applied itself.** If you pinned the blob before calling `upload()` (e.g.
 because the same blob is also referenced by something else in your app), the
 shim records `pinnedByShim: false` on the queue entry and leaves your pin
 alone, both during and after delivery.
+
+The pin is a per-blob boolean while records are per `(pubkey, sha256)`, so
+ownership is shared: a second account queueing the same blob inherits the
+shim-owned pin, and it is released only once every record for that blob is
+delivered or deleted.
 
 A blob whose bytes are deleted from the cache while still pending will have
 its next attempt fail with `lastErrors[server] = 'blob bytes missing from
@@ -152,15 +189,15 @@ introduce server-to-server dependencies that complicate the model.
 ### What the shim does NOT do
 
 - **It never signs.** Whatever bytes you pass are forwarded as-is to
-  `ndk.blossom.uploadBlob`, which signs the BUD-01 authorization event using
-  the `EventSigner` configured on NDK. The shim has no opinion on signing.
+  `ndk.blossom.uploadBlob`, which signs the BUD-01 authorization event. The
+  shim only picks *which* signer NDK uses, for entries queued with a `pubkey`.
 - **It never hashes.** The caller provides the sha256. The cache stores by
   that key. The shim queues by that key.
 - **It never requests server-side media optimisation.** `serverMediaOptimisation`
   would re-encode the blob server-side and change the resulting sha256,
   breaking content-addressing. Hardcoded `false`.
-- **It never deletes records.** Even after full delivery, the entry stays in
-  the database. If you want retention, prune sembast directly.
+- **It never deletes records on its own.** Even after full delivery, the entry
+  stays in the database until you call one of the `clear*` methods.
 - **It does not give up.** Without a `maxAttempts` knob, a deterministically
   rejected upload (size too big for the server, blob type not allowed, etc.)
   will retry forever with exponential backoff. Inspect
@@ -194,6 +231,7 @@ final outbox = OfflineBlossomUpload(
         required serverUrls,
         required precomputedSha256,
         contentType,
+        pubkey,
       }) async => [
         for (final s in serverUrls)
           BlobUploadResult(serverUrl: s, success: true),
