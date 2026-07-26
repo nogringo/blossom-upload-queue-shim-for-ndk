@@ -1,3 +1,9 @@
+## 0.6.0
+
+- Require `blossom_cache: ^0.4.0`. Custom `BlossomCache` implementations must
+  now provide `clearAllLocalData`; callers of the built-in caches are
+  unaffected. The shim's own API is unchanged.
+
 ## 0.5.0
 
 - **Breaking:** `BlobUploadFn` gains a `String? pubkey` named parameter.
