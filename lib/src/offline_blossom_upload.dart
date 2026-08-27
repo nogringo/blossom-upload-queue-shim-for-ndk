@@ -169,7 +169,7 @@ class OfflineBlossomUpload {
     final onlineSignal = ndk.connectivity.relayConnectivityChanges
         .map(
           (relays) =>
-              relays.values.any((rc) => rc.isConnected && isPublicHost(rc.url)),
+              relays.any((rc) => rc.isConnected && isPublicHost(rc.url)),
         )
         .distinct();
     return OfflineBlossomUpload(

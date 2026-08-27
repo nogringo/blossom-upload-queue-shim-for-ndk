@@ -1,3 +1,7 @@
+## 0.7.0
+
+- Require `ndk: ^0.9.0`.
+
 ## 0.6.0
 
 - Require `blossom_cache: ^0.4.0`. Custom `BlossomCache` implementations must

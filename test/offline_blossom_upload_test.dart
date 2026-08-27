@@ -600,11 +600,9 @@ void main() {
 
       final all = await outbox.listAll();
       expect(all.length, 2);
-      expect(
-        all.singleWhere((r) => r.pubkey == alice).servers,
-        const ['https://a'],
-        reason: 'bob must not widen alice\'s target list',
-      );
+      expect(all.singleWhere((r) => r.pubkey == alice).servers, const [
+        'https://a',
+      ], reason: 'bob must not widen alice\'s target list');
       expect(all.singleWhere((r) => r.pubkey == bob).servers, const [
         'https://b',
       ]);

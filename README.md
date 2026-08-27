@@ -25,9 +25,9 @@ perspective. This shim sits in front of `ndk.blossom.uploadBlob` and adds:
 
 ```yaml
 dependencies:
-  blossom_upload_queue_shim_for_ndk: ^0.1.0
-  blossom_cache: ^0.1.0
-  ndk: ^0.8.3
+  blossom_upload_queue_shim_for_ndk: ^0.7.0
+  blossom_cache: ^0.4.0
+  ndk: ^0.9.0
   sembast: ^3.8.7
   idb_shim: ^2.9.2
 ```
