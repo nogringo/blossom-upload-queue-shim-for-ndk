@@ -1,3 +1,10 @@
+## 0.7.1
+
+- Widen the `ndk` constraint to `>=0.9.0 <0.11.0`, so the shim can be used
+  alongside the 0.10.x line. The APIs it relies on (`blossom.uploadBlob`,
+  `accounts`, `connectivity.relayConnectivityChanges`) are untouched by ndk's
+  0.10.0 breaking changes, which cover relay requests and authentication.
+
 ## 0.7.0
 
 - Require `ndk: ^0.9.0`.
