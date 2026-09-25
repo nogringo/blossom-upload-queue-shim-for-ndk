@@ -142,12 +142,12 @@ Pass `pubkey` to `upload()` to bind an entry to a nostr account:
   accounts yields two independent entries. Account-less entries keep the bare
   `sha256` key, so existing databases keep working. `get()`, `watch()` and
   `reupload()` take an optional `pubkey`, `watchPending()` too.
-- Every attempt is signed by that account, passed to NDK as `customSigner`,
-  which wins over the logged-in one. A retry firing hours later still uploads
-  under the queueing identity.
+- Every attempt is signed by that account, passed to NDK as
+  `AuthPolicy.require`, which wins over the logged-in one. A retry firing
+  hours later still uploads under the queueing identity.
 - If that account can no longer sign (logged out, or read-only), the entry is
-  deferred untouched rather than misattributed: handed no usable signer, NDK
-  silently falls back to a throwaway keypair.
+  deferred untouched rather than counted as a failed attempt: NDK refuses to
+  upload with `BlossomAuthUnavailableException`.
 
 With your own `uploadFn`, it receives the entry's `pubkey` and must sign with
 it; pass `canSignFor` to get the deferral.

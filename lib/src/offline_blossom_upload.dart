@@ -150,12 +150,13 @@ class OfflineBlossomUpload {
   /// will not mask a real outage.
   ///
   /// Entries queued with a `pubkey` are signed by *that* account on every
-  /// attempt, resolved from `ndk.accounts` and passed as `customSigner`, which
-  /// takes priority over the logged-in account. NDK keeps a signer per added
-  /// account, so a retry fired while another account is active still uploads
-  /// under the queueing identity. If the account can no longer sign (logged
-  /// out, or read-only), the entry is deferred rather than signed by the wrong
-  /// key: NDK would otherwise fall back to a throwaway keypair.
+  /// attempt, resolved from `ndk.accounts` and passed as
+  /// `AuthPolicy.require`, which takes priority over the logged-in account.
+  /// NDK keeps a signer per added account, so a retry fired while another
+  /// account is active still uploads under the queueing identity. If the
+  /// account can no longer sign (logged out, or read-only), the entry is
+  /// deferred rather than failed: NDK would otherwise throw
+  /// `BlossomAuthUnavailableException` and burn an attempt.
   factory OfflineBlossomUpload.withNdk(
     Ndk ndk, {
     required BlossomCache cache,
@@ -186,9 +187,10 @@ class OfflineBlossomUpload {
             contentType: contentType,
             strategy: UploadStrategy.allSimultaneous,
             precomputedSha256: precomputedSha256,
-            customSigner: pubkey == null
-                ? null
-                : ndk.accounts.accounts[pubkey]?.signer,
+            auth: switch (ndk.accounts.accounts[pubkey]) {
+              final account? => AuthPolicy.require(account),
+              null => null,
+            },
           ),
       canSignFor: (pubkey) =>
           ndk.accounts.accounts[pubkey]?.signer.canSign() ?? false,

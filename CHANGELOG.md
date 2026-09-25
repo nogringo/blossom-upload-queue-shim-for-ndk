@@ -1,3 +1,9 @@
+## 0.8.0
+
+- Require `ndk: ^0.10.0-dev.7`, which replaces blossom's `customSigner` with
+  `auth`. `withNdk` now passes `AuthPolicy.require` for account-bound entries.
+  The shim's own API is unchanged.
+
 ## 0.7.1
 
 - Widen the `ndk` constraint to `>=0.9.0 <0.11.0`, so the shim can be used
