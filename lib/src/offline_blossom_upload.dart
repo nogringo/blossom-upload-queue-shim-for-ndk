@@ -65,12 +65,14 @@ class OfflineBlossomUpload {
   final int Function() _now;
   final Stream<bool>? _onlineSignal;
   final CanSignForFn? _canSignFor;
+  final String _pinHolder;
 
   Timer? _tickTimer;
   StreamSubscription<bool>? _onlineSub;
   bool _isOnline = true;
   final Map<String, Future<void>> _inFlight = <String, Future<void>>{};
   bool _disposed = false;
+  late final Future<void> _legacyPinsMigrated = _migrateLegacyPins();
 
   OfflineBlossomUpload._({
     required BlobUploadFn uploadFn,
@@ -89,6 +91,7 @@ class OfflineBlossomUpload {
        _canSignFor = canSignFor,
        _cache = cache,
        _store = QueueStore(db: db, storeName: storeName),
+       _pinHolder = 'blossom_upload_queue_shim:$storeName',
        _tickInterval = tickInterval,
        _initialBackoff = initialBackoff,
        _maxBackoff = maxBackoff,
@@ -213,8 +216,8 @@ class OfflineBlossomUpload {
   /// The blob must already live in the [BlossomCache] passed to the
   /// constructor; the shim looks it up via `cache.head(sha256)` and throws
   /// [StateError] if it is absent. While the entry is pending, the shim pins
-  /// the blob to protect it from auto-eviction. The pin is released on
-  /// delivery, but only if the shim was the one that applied it.
+  /// the blob under its own holder to protect it from auto-eviction, and
+  /// releases that pin on delivery. Pins held by anyone else are untouched.
   ///
   /// Pass [pubkey] to bind the entry to a nostr account: every attempt is then
   /// signed by that account rather than by whoever is logged in when the retry
@@ -236,6 +239,7 @@ class OfflineBlossomUpload {
     if (servers.isEmpty) {
       throw ArgumentError.value(servers, 'servers', 'must not be empty');
     }
+    await _legacyPinsMigrated;
     final normalizedServers = _dedupNormalized(servers);
     final now = _now();
 
@@ -256,20 +260,15 @@ class OfflineBlossomUpload {
         ...normalizedServers,
       ]);
       final fullyAcked = mergedServers.every(existing.ackedServers.contains);
-      // We may need to re-pin if the merge demotes the entry back to pending.
-      final shouldPin = !fullyAcked && !existing.pinnedByShim;
-      final didPin = shouldPin
-          ? await _acquirePin(sha256, exceptKey: key)
-          : false;
+      if (!fullyAcked) await _cache.pin(sha256, by: _holderFor(pubkey));
       record = existing.copyWith(
         servers: mergedServers,
         contentType: existing.contentType ?? effectiveContentType,
         nextAttemptAt: now,
         clearDelivered: !fullyAcked,
-        pinnedByShim: existing.pinnedByShim || didPin,
       );
     } else {
-      final didPin = await _acquirePin(sha256);
+      await _cache.pin(sha256, by: _holderFor(pubkey));
       record = QueuedBlobUpload(
         sha256: sha256,
         pubkey: pubkey,
@@ -283,7 +282,6 @@ class OfflineBlossomUpload {
         nextAttemptAt: now,
         deliveredAt: null,
         createdAt: now,
-        pinnedByShim: didPin,
       );
     }
     await _store.put(record);
@@ -313,6 +311,7 @@ class OfflineBlossomUpload {
     String? pubkey,
   }) async {
     _ensureNotDisposed();
+    await _legacyPinsMigrated;
     final now = _now();
     final key = QueuedBlobUpload.keyFor(sha256: sha256, pubkey: pubkey);
     final updated = await _store.update(key, (current) {
@@ -335,14 +334,8 @@ class OfflineBlossomUpload {
       );
     });
     if (updated == null) return null;
-    // Demoted back to pending and no shim-owned pin? Try to take ownership.
-    if (updated.deliveredAt == null && !updated.pinnedByShim) {
-      final didPin = await _acquirePin(sha256, exceptKey: key);
-      if (didPin) {
-        await _store.update(key, (current) {
-          return current.copyWith(pinnedByShim: true);
-        });
-      }
+    if (updated.deliveredAt == null) {
+      await _cache.pin(sha256, by: _holderFor(pubkey));
     }
     unawaited(_attempt(key));
     return updated;
@@ -376,29 +369,26 @@ class OfflineBlossomUpload {
   /// Deletes every queue record bound to [pubkey], delivered or not.
   ///
   /// Records belonging to other accounts, and account-less records, are left
-  /// alone. A blob still needed by another account keeps its cache pin; a pin
-  /// the caller applied themselves is never released. The blob bytes stay in
-  /// the cache either way: they belong to the caller, not to the shim.
+  /// alone, and so are their pins. Only the pins the shim held for this
+  /// account are released. The blob bytes stay in the cache either way: they
+  /// belong to the caller, not to the shim.
   Future<void> clearLocalAccountData({required String pubkey}) async {
     _ensureNotDisposed();
+    await _legacyPinsMigrated;
     final doomed = await _store.findByPubkey(pubkey);
-    if (doomed.isEmpty) return;
     await _store.deleteKeys(doomed.map((r) => r.key).toList(growable: false));
-    for (final record in doomed) {
-      if (!record.pinnedByShim) continue;
-      await _releasePinIfOrphaned(record.sha256);
-    }
+    await _cache.unpinAll(_holderFor(pubkey));
   }
 
   /// Deletes every queue record, for all accounts. Blob bytes stay in the
-  /// cache; only pins the shim itself applied are released.
+  /// cache; only the shim's own pins are released.
   Future<void> clearAllLocalData() async {
     _ensureNotDisposed();
+    await _legacyPinsMigrated;
     final all = await _store.findAll();
     await _store.deleteAll();
-    for (final sha256
-        in all.where((r) => r.pinnedByShim).map((r) => r.sha256).toSet()) {
-      await _cache.unpin(sha256);
+    for (final pubkey in all.map((r) => r.pubkey).toSet()) {
+      await _cache.unpinAll(_holderFor(pubkey));
     }
   }
 
@@ -465,6 +455,7 @@ class OfflineBlossomUpload {
     _inFlight[key] = completer.future;
 
     try {
+      await _legacyPinsMigrated;
       final record = await _store.get(key);
       if (record == null) return;
       if (record.deliveredAt != null && record.forcedServers == null) return;
@@ -485,7 +476,7 @@ class OfflineBlossomUpload {
           }
           return null;
         });
-        await _maybeReleasePin(sha256);
+        await _releasePinIfDelivered(key);
         return;
       }
 
@@ -584,52 +575,38 @@ class OfflineBlossomUpload {
           clearForcedServers: true,
         );
       });
-      await _maybeReleasePin(sha256);
+      await _releasePinIfDelivered(key);
     } finally {
       _inFlight.remove(key);
       completer.complete();
     }
   }
 
-  /// Pins [sha256] for a record that is about to become pending, and reports
-  /// whether the shim owns the resulting pin.
-  ///
-  /// The cache pin is a per-blob boolean, not a refcount, while records are
-  /// per (account, blob). Ownership is therefore shared: if a sibling record
-  /// already holds a shim-owned pin, this record inherits that ownership
-  /// instead of pinning again, so the last sibling standing still protects the
-  /// bytes. A pin that was already there and is not ours stays foreign.
-  Future<bool> _acquirePin(String sha256, {String? exceptKey}) async {
-    final siblings = await _store.findBySha256(sha256);
-    for (final sibling in siblings) {
-      if (sibling.key == exceptKey) continue;
-      if (sibling.pinnedByShim) return true;
-    }
-    return _cache.pin(sha256);
+  /// One holder per account, so each record owns exactly one pin on its blob
+  /// and an account's pins can be dropped in one `unpinAll`.
+  String _holderFor(String? pubkey) =>
+      pubkey == null ? _pinHolder : '$_pinHolder:$pubkey';
+
+  Future<void> _releasePinIfDelivered(String key) async {
+    final record = await _store.get(key);
+    if (record == null || record.deliveredAt == null) return;
+    await _cache.unpin(record.sha256, by: _holderFor(record.pubkey));
   }
 
-  /// Releases the shim-owned pin on [sha256] once *every* record for that blob
-  /// is delivered. No-op while any account still owes an upload, or if the pin
-  /// was not applied by the shim.
-  Future<void> _maybeReleasePin(String sha256) async {
-    final siblings = await _store.findBySha256(sha256);
-    if (!siblings.any((r) => r.pinnedByShim)) return;
-    if (siblings.any((r) => r.deliveredAt == null)) return;
-    await _cache.unpin(sha256);
-    for (final sibling in siblings.where((r) => r.pinnedByShim)) {
-      await _store.update(sibling.key, (current) {
-        return current.copyWith(pinnedByShim: false);
-      });
+  /// Up to 0.8.0 the shim pinned under [BlossomCache.defaultHolder], shared
+  /// with the caller, and flagged the records owning that pin. Moves those
+  /// pins to the shim's own holders, then drops the flags.
+  Future<void> _migrateLegacyPins() async {
+    final legacy = await _store.findLegacyPinned();
+    for (final record in legacy.where((r) => r.deliveredAt == null)) {
+      await _cache.pin(record.sha256, by: _holderFor(record.pubkey));
     }
-  }
-
-  /// Releases the shim-owned pin on [sha256] after its last record was
-  /// deleted. Keeps the pin while another account still has a record for the
-  /// same blob.
-  Future<void> _releasePinIfOrphaned(String sha256) async {
-    final remaining = await _store.findBySha256(sha256);
-    if (remaining.isNotEmpty) return;
-    await _cache.unpin(sha256);
+    for (final sha256 in legacy.map((r) => r.sha256).toSet()) {
+      await _cache.unpin(sha256);
+    }
+    for (final record in legacy) {
+      await _store.put(record);
+    }
   }
 
   void _ensureNotDisposed() {

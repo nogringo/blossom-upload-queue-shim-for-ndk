@@ -11,6 +11,8 @@ import 'package:test/test.dart';
 /// Hex sha256 placeholder. The cache treats it as an opaque key.
 final _sha = 'a' * 64;
 
+const _shimHolder = 'blossom_upload_queue_shim:blob_uploads';
+
 Uint8List _bytes() => Uint8List.fromList(List<int>.generate(8, (i) => i));
 
 /// Records every call made to the fake upload function and lets the test
@@ -492,23 +494,12 @@ void main() {
     expect(initial!.pinned, isFalse);
 
     await outbox.upload(sha256: _sha, servers: const ['https://a']);
-    // Right after enqueue, the shim should own the pin.
-    final pending = await outbox.get(_sha);
-    expect(pending!.pinnedByShim, isTrue);
-    expect((await cache.head(_sha))!.pinned, isTrue);
+    expect((await cache.head(_sha))!.pinnedBy, [_shimHolder]);
 
-    // Wait for full reconciliation: delivered AND the shim has released the
-    // pin. The shim updates sembast in two steps (deliveredAt, then
-    // pinnedByShim=false after cache.unpin), so waiting on `delivered` alone
-    // would race against the cache release.
-    await _waitFor(
-      outbox,
-      _sha,
-      (r) => r.status == BlobUploadStatus.delivered && !r.pinnedByShim,
-    );
-    expect((await cache.head(_sha))!.pinned, isFalse);
-
+    await _waitFor(outbox, _sha, (r) => r.status == BlobUploadStatus.delivered);
+    // The unpin follows the delivered write; dispose waits for it.
     await outbox.dispose();
+    expect((await cache.head(_sha))!.pinned, isFalse);
   });
 
   test('shim does not unpin a caller-owned pin', () async {
@@ -525,19 +516,69 @@ void main() {
     );
 
     await outbox.upload(sha256: _sha, servers: const ['https://a']);
-    final pending = await outbox.get(_sha);
-    expect(
-      pending!.pinnedByShim,
-      isFalse,
-      reason: 'pin was already there, so the shim does not claim it',
+    await _waitFor(outbox, _sha, (r) => r.status == BlobUploadStatus.delivered);
+    await outbox.dispose();
+
+    expect((await cache.head(_sha))!.pinnedBy, [BlossomCache.defaultHolder]);
+  });
+
+  test('a caller pin applied after upload survives delivery', () async {
+    final fake = FakeUploader();
+    fake.fail('https://a');
+    final outbox = OfflineBlossomUpload(
+      uploadFn: fake.fn,
+      cache: cache,
+      db: db,
+      initialBackoff: const Duration(milliseconds: 1),
     );
 
+    await outbox.upload(sha256: _sha, servers: const ['https://a']);
+    await cache.pin(_sha);
+    fake.ackAll(['https://a']);
+    await outbox.retryNow();
     await _waitFor(outbox, _sha, (r) => r.status == BlobUploadStatus.delivered);
-
-    // The caller-owned pin must survive delivery.
-    expect((await cache.head(_sha))!.pinned, isTrue);
-
     await outbox.dispose();
+
+    expect((await cache.head(_sha))!.pinnedBy, [BlossomCache.defaultHolder]);
+  });
+
+  test('moves pins left by 0.8.0 to the shim holder', () async {
+    final store = stringMapStoreFactory.store('blob_uploads');
+    final legacy = QueuedBlobUpload(
+      sha256: _sha,
+      contentType: 'image/png',
+      servers: const ['https://a'],
+      ackedServers: const [],
+      lastErrors: const {},
+      attempts: 0,
+      firstAttemptAt: null,
+      lastAttemptAt: null,
+      nextAttemptAt: 0,
+      deliveredAt: null,
+      createdAt: 0,
+    );
+    await store.record(legacy.key).put(db, {
+      ...legacy.toMap(),
+      'pinnedByShim': true,
+    });
+    await cache.pin(_sha);
+
+    final fake = FakeUploader();
+    fake.fail('https://a');
+    final outbox = OfflineBlossomUpload(
+      uploadFn: fake.fn,
+      cache: cache,
+      db: db,
+      initialBackoff: const Duration(seconds: 30),
+    );
+    await outbox.retryNow();
+    await outbox.dispose();
+
+    expect((await cache.head(_sha))!.pinnedBy, [_shimHolder]);
+    expect(
+      (await store.record(legacy.key).get(db))!.containsKey('pinnedByShim'),
+      isFalse,
+    );
   });
 
   group('account binding', () {
@@ -761,11 +802,6 @@ void main() {
         pubkey: bob,
       );
       expect((await cache.head(_sha))!.pinned, isTrue);
-      expect(
-        (await outbox.get(_sha, pubkey: bob))!.pinnedByShim,
-        isTrue,
-        reason: 'pin ownership is shared, not claimed by the first record only',
-      );
 
       await outbox.clearLocalAccountData(pubkey: alice);
       expect(

@@ -1,3 +1,12 @@
+## 0.9.0
+
+- Require `blossom_cache: ^0.5.0`. The shim now pins under its own holder, one
+  per account, instead of sharing `BlossomCache.defaultHolder` with the
+  caller. A pin the caller applies after `upload()` is no longer released on
+  delivery.
+- **Breaking:** `QueuedBlobUpload.pinnedByShim` is removed. Pins recorded by
+  earlier versions are moved to the shim's holder on first use.
+
 ## 0.8.0
 
 - Require `ndk: ^0.10.0-dev.7`, which replaces blossom's `customSigner` with

@@ -5,7 +5,6 @@ QueuedBlobUpload _base({
   List<String> servers = const ['https://a'],
   List<String> ackedServers = const [],
   int? deliveredAt,
-  bool pinnedByShim = false,
 }) {
   return QueuedBlobUpload(
     sha256: 'a' * 64,
@@ -19,7 +18,6 @@ QueuedBlobUpload _base({
     nextAttemptAt: 0,
     deliveredAt: deliveredAt,
     createdAt: 0,
-    pinnedByShim: pinnedByShim,
   );
 }
 
@@ -56,7 +54,6 @@ void main() {
         deliveredAt: null,
         createdAt: 50,
         forcedServers: const ['https://cdn.example'],
-        pinnedByShim: true,
       );
       final restored = QueuedBlobUpload.fromMap(original.toMap());
       expect(restored.sha256, original.sha256);
@@ -65,19 +62,12 @@ void main() {
       expect(restored.lastErrors, original.lastErrors);
       expect(restored.attempts, original.attempts);
       expect(restored.forcedServers, original.forcedServers);
-      expect(restored.pinnedByShim, isTrue);
     });
 
     test('copyWith clearDelivered forces null even when arg is non-null', () {
       final delivered = _base(deliveredAt: 42);
       final cleared = delivered.copyWith(clearDelivered: true);
       expect(cleared.deliveredAt, isNull);
-    });
-
-    test('copyWith preserves pinnedByShim when not specified', () {
-      final pinned = _base(pinnedByShim: true);
-      final touched = pinned.copyWith(attempts: 1);
-      expect(touched.pinnedByShim, isTrue);
     });
   });
 }

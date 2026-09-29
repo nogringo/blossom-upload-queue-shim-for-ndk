@@ -62,10 +62,11 @@ class QueueStore {
 
   Future<List<QueuedBlobUpload>> findAll() => _find(null);
 
-  /// Every record for [sha256], across all accounts. Used to reason about the
-  /// shared cache pin, which is per-blob while records are per (account, blob).
-  Future<List<QueuedBlobUpload>> findBySha256(String sha256) =>
-      _find(Finder(filter: Filter.equals('sha256', sha256)));
+  /// Records written by 0.8.0 or earlier that still carry `pinnedByShim:
+  /// true`. [put] drops the flag, since [QueuedBlobUpload.toMap] no longer
+  /// writes it.
+  Future<List<QueuedBlobUpload>> findLegacyPinned() =>
+      _find(Finder(filter: Filter.equals('pinnedByShim', true)));
 
   Future<List<QueuedBlobUpload>> findByPubkey(String pubkey) =>
       _find(Finder(filter: Filter.equals('pubkey', pubkey)));

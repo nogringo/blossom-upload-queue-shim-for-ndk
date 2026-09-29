@@ -74,12 +74,6 @@ class QueuedBlobUpload {
   /// eligible for one more push without rewriting its history.
   final List<String>? forcedServers;
 
-  /// Whether the cache pin on [sha256] was applied by the shim itself (as
-  /// opposed to a pre-existing pin owned by the caller). The shim only
-  /// releases the pin when this flag is `true`, so a caller-owned pin is
-  /// never accidentally cleared.
-  final bool pinnedByShim;
-
   /// Creates a record. Most callers should not invoke this directly; records
   /// are produced by `OfflineBlossomUpload`.
   QueuedBlobUpload({
@@ -96,7 +90,6 @@ class QueuedBlobUpload {
     required this.createdAt,
     this.pubkey,
     this.forcedServers,
-    this.pinnedByShim = false,
   });
 
   /// The sembast record key for this entry.
@@ -135,7 +128,6 @@ class QueuedBlobUpload {
     int? nextAttemptAt,
     int? deliveredAt,
     List<String>? forcedServers,
-    bool? pinnedByShim,
     bool clearDelivered = false,
     bool clearForcedServers = false,
     bool clearContentType = false,
@@ -156,7 +148,6 @@ class QueuedBlobUpload {
       forcedServers: clearForcedServers
           ? null
           : (forcedServers ?? this.forcedServers),
-      pinnedByShim: pinnedByShim ?? this.pinnedByShim,
     );
   }
 
@@ -176,7 +167,6 @@ class QueuedBlobUpload {
       'deliveredAt': deliveredAt,
       'createdAt': createdAt,
       'forcedServers': forcedServers,
-      'pinnedByShim': pinnedByShim,
     };
   }
 
@@ -198,7 +188,6 @@ class QueuedBlobUpload {
       deliveredAt: map['deliveredAt'] as int?,
       createdAt: map['createdAt'] as int,
       forcedServers: (map['forcedServers'] as List?)?.cast<String>(),
-      pinnedByShim: map['pinnedByShim'] as bool? ?? false,
     );
   }
 }

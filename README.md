@@ -162,17 +162,12 @@ Blob bytes stay in the cache either way; only shim-owned pins are released.
 
 ### Pin ownership
 
-The shim pins the blob in the `BlossomCache` when it takes ownership of an
-upload, and releases the pin on `delivered`. **It only releases pins it
-applied itself.** If you pinned the blob before calling `upload()` (e.g.
-because the same blob is also referenced by something else in your app), the
-shim records `pinnedByShim: false` on the queue entry and leaves your pin
-alone, both during and after delivery.
-
-The pin is a per-blob boolean while records are per `(pubkey, sha256)`, so
-ownership is shared: a second account queueing the same blob inherits the
-shim-owned pin, and it is released only once every record for that blob is
-delivered or deleted.
+The shim pins the blob in the `BlossomCache` while an upload is pending and
+releases the pin on `delivered`. It pins under its own holder,
+`blossom_upload_queue_shim:<storeName>`, suffixed with `:<pubkey>` for
+account-bound entries, so each record owns exactly one pin. **It never touches
+pins held by anyone else**: pin the blob yourself, before or after `upload()`,
+and your pin survives delivery.
 
 A blob whose bytes are deleted from the cache while still pending will have
 its next attempt fail with `lastErrors[server] = 'blob bytes missing from
