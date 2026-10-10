@@ -51,8 +51,8 @@ typedef CanSignForFn = bool Function(String pubkey);
 ///    each `pending` entry until every server in [QueuedBlobUpload.servers]
 ///    has acknowledged it.
 ///  - Records are never auto-deleted. A delivered entry stays in the store
-///    for manual `reupload` or inspection; `clearLocalAccountData` and
-///    `clearAllLocalData` are the only ways to remove entries.
+///    for manual `reupload` or inspection; `remove`, `clearLocalAccountData`
+///    and `clearAllLocalData` are the only ways to remove entries.
 ///  - An entry queued with a `pubkey` is signed by that account on every
 ///    attempt, and is deferred rather than signed by anyone else when that
 ///    account cannot sign.
@@ -429,6 +429,19 @@ class OfflineBlossomUpload {
 
   /// One-shot read of every record in the store, delivered or not.
   Future<List<QueuedBlobUpload>> listAll() => _store.findAll();
+
+  /// Deletes the record for [sha256] under [pubkey], delivered or not, and
+  /// releases the pin the shim held for it. The blob bytes stay in the cache.
+  /// Does nothing if no such record exists. An attempt already in flight may
+  /// still reach its servers, but does not bring the record back.
+  Future<void> remove(String sha256, {String? pubkey}) async {
+    _ensureNotDisposed();
+    await _legacyPinsMigrated;
+    await _store.deleteKeys([
+      QueuedBlobUpload.keyFor(sha256: sha256, pubkey: pubkey),
+    ]);
+    await _cache.unpin(sha256, by: _holderFor(pubkey));
+  }
 
   /// Deletes every queue record bound to [pubkey], delivered or not.
   ///

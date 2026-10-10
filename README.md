@@ -224,8 +224,11 @@ Pass `pubkey` to `upload()` to bind an entry to a nostr account:
 With your own `uploadFn`, it receives the entry's `pubkey` and must sign with
 it; pass `canSignFor` to get the deferral.
 
-### Clearing local data
+### Removing entries
 
+- `remove(sha256, pubkey:)` deletes that one record, delivered or not. An
+  attempt already in flight may still reach its servers, but the record stays
+  gone.
 - `clearLocalAccountData(pubkey:)` deletes every record bound to that account,
   delivered or not. Other accounts and account-less records are untouched.
 - `clearAllLocalData()` deletes every record.
@@ -264,11 +267,11 @@ introduce server-to-server dependencies that complicate the model.
   would re-encode the blob server-side and change the resulting sha256,
   breaking content-addressing. Hardcoded `false`.
 - **It never deletes records on its own.** Even after full delivery, the entry
-  stays in the store until you call one of the `clear*` methods.
+  stays in the store until you call `remove()` or one of the `clear*` methods.
 - **It does not give up.** Without a `maxAttempts` knob, a deterministically
   rejected upload (size too big for the server, blob type not allowed, etc.)
   will retry forever with exponential backoff. Inspect
-  `QueuedBlobUpload.lastErrors` and remove manually if needed.
+  `QueuedBlobUpload.lastErrors` and call `remove()` if needed.
 
 ## Tuning
 

@@ -15,6 +15,8 @@
 - Add `sync()`, which attempts every undelivered entry once regardless of the
   backoff, waits for the outcome and returns a `SyncReport` of delivered,
   failed and skipped entries.
+- Add `remove()`, which deletes a single queue entry and releases the shim's
+  pin on its blob.
 
 ## 0.9.0
 

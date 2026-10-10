@@ -436,6 +436,7 @@ void main() {
       () => outbox.upload(sha256: _sha, servers: const ['https://a']),
       throwsStateError,
     );
+    expect(() => outbox.remove(_sha), throwsStateError);
   });
 
   test(
@@ -935,6 +936,131 @@ void main() {
       expect((await cache.head(_sha))!.pinned, isTrue);
 
       await outbox.dispose();
+    });
+
+    test('remove deletes a pending entry and releases our pin', () async {
+      final fake = FakeUploader();
+      fake.fail('https://a');
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        store: store,
+        initialBackoff: const Duration(seconds: 30),
+      );
+
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.remove(_sha);
+
+      expect(await outbox.get(_sha), isNull);
+      expect((await cache.head(_sha))!.pinned, isFalse);
+      expect(await cache.get(_sha), isNotNull);
+
+      await outbox.dispose();
+    });
+
+    test('remove only touches the record it names', () async {
+      final fake = FakeUploader();
+      fake.fail('https://a');
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        store: store,
+        initialBackoff: const Duration(seconds: 30),
+      );
+
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.upload(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: bob,
+      );
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+
+      await outbox.remove(_sha, pubkey: alice);
+
+      expect(await outbox.get(_sha, pubkey: alice), isNull);
+      expect(await outbox.get(_sha, pubkey: bob), isNotNull);
+      expect(await outbox.get(_sha), isNotNull);
+      expect(
+        (await cache.head(_sha))!.pinnedBy,
+        unorderedEquals([_shimHolder, '$_shimHolder:$bob']),
+      );
+
+      await outbox.dispose();
+    });
+
+    test('remove deletes a delivered entry', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        store: store,
+      );
+
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await _waitFor(
+        outbox,
+        _sha,
+        (r) => r.status == BlobUploadStatus.delivered,
+      );
+      await outbox.remove(_sha);
+
+      expect(await outbox.listAll(), isEmpty);
+
+      await outbox.dispose();
+    });
+
+    test('remove of a missing record leaves a caller pin alone', () async {
+      await cache.pin(_sha);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: FakeUploader().fn,
+        cache: cache,
+        store: store,
+      );
+
+      await outbox.remove(_sha);
+      await outbox.remove(_sha, pubkey: alice);
+      await outbox.remove('b' * 64);
+
+      expect((await cache.head(_sha))!.pinnedBy, [BlossomCache.defaultHolder]);
+
+      await outbox.dispose();
+    });
+
+    test('an attempt in flight does not bring a removed record back', () async {
+      final gate = Completer<void>();
+      final outbox = OfflineBlossomUpload(
+        uploadFn:
+            ({
+              required data,
+              required serverUrls,
+              required precomputedSha256,
+              contentType,
+              pubkey,
+            }) async {
+              await gate.future;
+              return [
+                for (final s in serverUrls)
+                  BlobUploadResult(serverUrl: s, success: true),
+              ];
+            },
+        cache: cache,
+        store: store,
+      );
+
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await Future.delayed(const Duration(milliseconds: 20));
+      await outbox.remove(_sha);
+      gate.complete();
+      await outbox.dispose();
+
+      expect(await outbox.get(_sha), isNull);
+      expect((await cache.head(_sha))!.pinned, isFalse);
     });
   });
 
