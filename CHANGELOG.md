@@ -1,3 +1,16 @@
+## 0.10.0
+
+- **Breaking:** queue storage is pluggable, so sembast is no longer required.
+  `OfflineBlossomUpload()` and `OfflineBlossomUpload.withNdk()` take a
+  `store: UploadQueueStore` instead of `db` and `storeName`. Implement
+  `UploadQueueStore` to keep the queue in your own database.
+- The sembast store moves to
+  `package:blossom_upload_queue_shim_for_ndk/sembast_store.dart`. Replace
+  `db: db, storeName: name` with
+  `store: SembastUploadQueueStore(db, storeName: name)`. Existing databases and
+  pins carry over unchanged.
+- Add `InMemoryUploadQueueStore`, for tests or as a reference implementation.
+
 ## 0.9.0
 
 - Require `blossom_cache: ^0.5.0`. The shim now pins under its own holder, one

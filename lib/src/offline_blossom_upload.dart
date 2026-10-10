@@ -4,12 +4,12 @@ import 'dart:typed_data';
 
 import 'package:blossom_cache/blossom_cache.dart';
 import 'package:ndk/ndk.dart';
-import 'package:sembast/sembast.dart';
 
 import 'backoff.dart';
+import 'legacy_pinned_records.dart';
 import 'public_host_filter.dart';
-import 'queue_store.dart';
 import 'queued_blob_upload.dart';
+import 'upload_queue_store.dart';
 
 /// Function that hands a blob off to the network. Matches the call pattern of
 /// `Ndk.blossom.uploadBlob` with `serverUrls` always provided. The shim always
@@ -41,8 +41,8 @@ typedef CanSignForFn = bool Function(String pubkey);
 /// Offline-first wrapper around NDK's Blossom upload.
 ///
 /// Contract:
-///  - `upload(sha256: ..., servers: [...])` persists the queue entry before
-///    returning. The blob bytes must already live in the caller-provided
+///  - `upload(sha256: ..., servers: [...])` persists the queue entry in the
+///    [UploadQueueStore] before returning. The blob bytes must already live in the caller-provided
 ///    [BlossomCache]; the shim pins them while delivery is pending.
 ///  - Delivery is guaranteed in the eventual sense: the shim keeps retrying
 ///    each `pending` entry until every server in [QueuedBlobUpload.servers]
@@ -56,7 +56,7 @@ typedef CanSignForFn = bool Function(String pubkey);
 class OfflineBlossomUpload {
   final BlobUploadFn _uploadFn;
   final BlossomCache _cache;
-  final QueueStore _store;
+  final UploadQueueStore _store;
   final Duration _tickInterval;
   final Duration _initialBackoff;
   final Duration _maxBackoff;
@@ -77,8 +77,7 @@ class OfflineBlossomUpload {
   OfflineBlossomUpload._({
     required BlobUploadFn uploadFn,
     required BlossomCache cache,
-    required Database db,
-    required String storeName,
+    required UploadQueueStore store,
     required Duration tickInterval,
     required Duration initialBackoff,
     required Duration maxBackoff,
@@ -90,8 +89,8 @@ class OfflineBlossomUpload {
   }) : _uploadFn = uploadFn,
        _canSignFor = canSignFor,
        _cache = cache,
-       _store = QueueStore(db: db, storeName: storeName),
-       _pinHolder = 'blossom_upload_queue_shim:$storeName',
+       _store = store,
+       _pinHolder = 'blossom_upload_queue_shim:${store.name}',
        _tickInterval = tickInterval,
        _initialBackoff = initialBackoff,
        _maxBackoff = maxBackoff,
@@ -116,8 +115,7 @@ class OfflineBlossomUpload {
   factory OfflineBlossomUpload({
     required BlobUploadFn uploadFn,
     required BlossomCache cache,
-    required Database db,
-    String storeName = 'blob_uploads',
+    required UploadQueueStore store,
     Duration tickInterval = const Duration(seconds: 30),
     Duration initialBackoff = const Duration(seconds: 5),
     Duration maxBackoff = const Duration(minutes: 30),
@@ -130,8 +128,7 @@ class OfflineBlossomUpload {
     return OfflineBlossomUpload._(
       uploadFn: uploadFn,
       cache: cache,
-      db: db,
-      storeName: storeName,
+      store: store,
       tickInterval: tickInterval,
       initialBackoff: initialBackoff,
       maxBackoff: maxBackoff,
@@ -163,8 +160,7 @@ class OfflineBlossomUpload {
   factory OfflineBlossomUpload.withNdk(
     Ndk ndk, {
     required BlossomCache cache,
-    required Database db,
-    String storeName = 'blob_uploads',
+    required UploadQueueStore store,
     Duration tickInterval = const Duration(seconds: 30),
     Duration initialBackoff = const Duration(seconds: 5),
     Duration maxBackoff = const Duration(minutes: 30),
@@ -198,8 +194,7 @@ class OfflineBlossomUpload {
       canSignFor: (pubkey) =>
           ndk.accounts.accounts[pubkey]?.signer.canSign() ?? false,
       cache: cache,
-      db: db,
-      storeName: storeName,
+      store: store,
       tickInterval: tickInterval,
       initialBackoff: initialBackoff,
       maxBackoff: maxBackoff,
@@ -407,7 +402,7 @@ class OfflineBlossomUpload {
 
   /// Stops the retry timer, cancels the connectivity subscription, and waits
   /// for any in-flight attempt to finish so the caller can safely close the
-  /// underlying sembast database and Blossom cache.
+  /// underlying queue store and Blossom cache.
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
@@ -597,7 +592,10 @@ class OfflineBlossomUpload {
   /// with the caller, and flagged the records owning that pin. Moves those
   /// pins to the shim's own holders, then drops the flags.
   Future<void> _migrateLegacyPins() async {
-    final legacy = await _store.findLegacyPinned();
+    final legacy = switch (_store) {
+      final LegacyPinnedRecords store => await store.findLegacyPinned(),
+      _ => const <QueuedBlobUpload>[],
+    };
     for (final record in legacy.where((r) => r.deliveredAt == null)) {
       await _cache.pin(record.sha256, by: _holderFor(record.pubkey));
     }

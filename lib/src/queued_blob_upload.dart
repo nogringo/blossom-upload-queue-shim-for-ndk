@@ -92,10 +92,10 @@ class QueuedBlobUpload {
     this.forcedServers,
   });
 
-  /// The sembast record key for this entry.
+  /// The store key for this entry.
   String get key => keyFor(sha256: sha256, pubkey: pubkey);
 
-  /// Builds the sembast record key for a (blob, account) pair: `pubkey|sha256`
+  /// Builds the store key for a (blob, account) pair: `pubkey|sha256`
   /// when bound to an account, the bare sha256 otherwise. Account-less entries
   /// keep their pre-0.5.0 key so existing databases keep working.
   static String keyFor({required String sha256, String? pubkey}) =>
@@ -151,7 +151,7 @@ class QueuedBlobUpload {
     );
   }
 
-  /// Serializes the record for sembast storage.
+  /// Serializes the record to a JSON-compatible map.
   Map<String, dynamic> toMap() {
     return {
       'sha256': sha256,

@@ -1,33 +1,38 @@
 import 'package:sembast/sembast.dart';
 
+import 'legacy_pinned_records.dart';
 import 'queued_blob_upload.dart';
+import 'upload_queue_store.dart';
 
-/// Sembast-backed persistent store for [QueuedBlobUpload] records.
+/// [UploadQueueStore] backed by a sembast [Database].
 ///
-/// Records are keyed by [QueuedBlobUpload.key], i.e. `pubkey|sha256` for
-/// account-bound entries and the bare sha256 otherwise. All writes are
-/// serialized through sembast transactions. The store name is caller-provided
-/// so multiple shims can coexist in the same database.
-class QueueStore {
+/// Records live in the sembast store named [name], so several queues can share
+/// one database. All writes are serialized through sembast transactions.
+class SembastUploadQueueStore implements UploadQueueStore, LegacyPinnedRecords {
   final Database _db;
   final StoreRef<String, Map<String, Object?>> _store;
 
-  QueueStore({required Database db, required String storeName})
+  @override
+  final String name;
+
+  SembastUploadQueueStore(Database db, {String storeName = 'blob_uploads'})
     : _db = db,
+      name = storeName,
       _store = stringMapStoreFactory.store(storeName);
 
+  @override
   Future<QueuedBlobUpload?> get(String key) async {
     final map = await _store.record(key).get(_db);
     if (map == null) return null;
     return QueuedBlobUpload.fromMap(_normalize(map));
   }
 
+  @override
   Future<void> put(QueuedBlobUpload record) async {
     await _store.record(record.key).put(_db, record.toMap());
   }
 
-  /// Atomically read-modify-write a record. The mutator runs inside a sembast
-  /// transaction; returning null leaves the record unchanged.
+  @override
   Future<QueuedBlobUpload?> update(
     String key,
     QueuedBlobUpload? Function(QueuedBlobUpload current) mutate,
@@ -43,9 +48,7 @@ class QueueStore {
     });
   }
 
-  /// Records eligible for an attempt right now: either still pending, or
-  /// delivered but carrying a [QueuedBlobUpload.forcedServers] override that
-  /// hasn't been consumed yet.
+  @override
   Future<List<QueuedBlobUpload>> findDue({required int now}) async {
     final finder = Finder(
       filter: Filter.custom((record) {
@@ -60,26 +63,29 @@ class QueueStore {
     return _find(finder);
   }
 
+  @override
   Future<List<QueuedBlobUpload>> findAll() => _find(null);
 
-  /// Records written by 0.8.0 or earlier that still carry `pinnedByShim:
-  /// true`. [put] drops the flag, since [QueuedBlobUpload.toMap] no longer
-  /// writes it.
+  @override
   Future<List<QueuedBlobUpload>> findLegacyPinned() =>
       _find(Finder(filter: Filter.equals('pinnedByShim', true)));
 
+  @override
   Future<List<QueuedBlobUpload>> findByPubkey(String pubkey) =>
       _find(Finder(filter: Filter.equals('pubkey', pubkey)));
 
+  @override
   Future<void> deleteKeys(List<String> keys) async {
     if (keys.isEmpty) return;
     await _db.transaction((txn) => _store.records(keys).delete(txn));
   }
 
+  @override
   Future<void> deleteAll() async {
     await _store.delete(_db);
   }
 
+  @override
   Stream<QueuedBlobUpload?> watch(String key) {
     return _store
         .record(key)
@@ -91,6 +97,7 @@ class QueueStore {
         );
   }
 
+  @override
   Stream<List<QueuedBlobUpload>> watchPending({String? pubkey}) {
     final filters = [
       Filter.equals('deliveredAt', null),

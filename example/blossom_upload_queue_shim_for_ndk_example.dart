@@ -2,14 +2,17 @@ import 'dart:typed_data';
 
 import 'package:blossom_cache/blossom_cache.dart';
 import 'package:blossom_upload_queue_shim_for_ndk/blossom_upload_queue_shim_for_ndk.dart';
+import 'package:blossom_upload_queue_shim_for_ndk/sembast_store.dart';
 import 'package:idb_shim/idb_io.dart';
 import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_io.dart';
 
 Future<void> main() async {
-  // 1. Open a sembast database for queue metadata. Use sembast_io on
-  //    dart:io targets, or sembast_web for the browser.
+  // 1. Pick a store for queue metadata. This one uses sembast: sembast_io on
+  //    dart:io targets, sembast_web in the browser. Implement UploadQueueStore
+  //    to use your own database instead.
   final db = await databaseFactoryIo.openDatabase('blossom_uploads.db');
+  final store = SembastUploadQueueStore(db);
 
   // 2. Open a Blossom cache for the bytes themselves. Web: idbFactoryBrowser.
   //    Native: idbFactorySembastIo. Tests: newIdbFactoryMemory().
@@ -22,7 +25,7 @@ Future<void> main() async {
   );
 
   // 4. Wrap the Blossom upload use case.
-  final outbox = OfflineBlossomUpload.withNdk(ndk, cache: cache, db: db);
+  final outbox = OfflineBlossomUpload.withNdk(ndk, cache: cache, store: store);
   outbox.start();
 
   // 5. Put the bytes in the cache first. The caller supplies the sha256 (the

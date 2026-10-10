@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:blossom_cache/blossom_cache.dart';
 import 'package:blossom_upload_queue_shim_for_ndk/blossom_upload_queue_shim_for_ndk.dart';
+import 'package:blossom_upload_queue_shim_for_ndk/sembast_store.dart';
 import 'package:idb_shim/idb_client_memory.dart' hide Database;
 import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_memory.dart';
@@ -89,10 +90,12 @@ Future<QueuedBlobUpload> _waitFor(
 
 void main() {
   late Database db;
+  late UploadQueueStore store;
   late BlossomCache cache;
 
   setUp(() async {
     db = await newDatabaseFactoryMemory().openDatabase('test.db');
+    store = SembastUploadQueueStore(db);
     cache = await _openCache();
     await cache.put(_bytes(), sha256: _sha, type: 'image/png');
   });
@@ -109,7 +112,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 10),
       );
 
@@ -143,7 +146,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: fake.fn,
       cache: cache,
-      db: db,
+      store: store,
       initialBackoff: const Duration(milliseconds: 5),
     );
 
@@ -168,7 +171,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: fake.fn,
       cache: cache,
-      db: db,
+      store: store,
       initialBackoff: const Duration(milliseconds: 1),
     );
 
@@ -200,7 +203,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
       );
 
@@ -256,7 +259,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
       );
 
@@ -299,7 +302,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
       );
 
@@ -335,7 +338,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: FakeUploader().fn,
       cache: cache,
-      db: db,
+      store: store,
     );
     expect(
       () => outbox.upload(sha256: _sha, servers: const []),
@@ -348,7 +351,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: FakeUploader().fn,
       cache: cache,
-      db: db,
+      store: store,
     );
     final missing = 'b' * 64;
     expect(
@@ -365,7 +368,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: fake.fn,
       cache: cache,
-      db: db,
+      store: store,
       initialBackoff: const Duration(milliseconds: 1),
     );
 
@@ -387,7 +390,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
       );
 
@@ -409,7 +412,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
       );
 
@@ -426,7 +429,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: FakeUploader().fn,
       cache: cache,
-      db: db,
+      store: store,
     );
     await outbox.dispose();
     expect(
@@ -443,7 +446,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 5),
       );
 
@@ -486,7 +489,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: fake.fn,
       cache: cache,
-      db: db,
+      store: store,
       initialBackoff: const Duration(milliseconds: 1),
     );
 
@@ -511,7 +514,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: fake.fn,
       cache: cache,
-      db: db,
+      store: store,
       initialBackoff: const Duration(milliseconds: 1),
     );
 
@@ -528,7 +531,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: fake.fn,
       cache: cache,
-      db: db,
+      store: store,
       initialBackoff: const Duration(milliseconds: 1),
     );
 
@@ -543,7 +546,7 @@ void main() {
   });
 
   test('moves pins left by 0.8.0 to the shim holder', () async {
-    final store = stringMapStoreFactory.store('blob_uploads');
+    final raw = stringMapStoreFactory.store('blob_uploads');
     final legacy = QueuedBlobUpload(
       sha256: _sha,
       contentType: 'image/png',
@@ -557,7 +560,7 @@ void main() {
       deliveredAt: null,
       createdAt: 0,
     );
-    await store.record(legacy.key).put(db, {
+    await raw.record(legacy.key).put(db, {
       ...legacy.toMap(),
       'pinnedByShim': true,
     });
@@ -568,7 +571,7 @@ void main() {
     final outbox = OfflineBlossomUpload(
       uploadFn: fake.fn,
       cache: cache,
-      db: db,
+      store: store,
       initialBackoff: const Duration(seconds: 30),
     );
     await outbox.retryNow();
@@ -576,7 +579,7 @@ void main() {
 
     expect((await cache.head(_sha))!.pinnedBy, [_shimHolder]);
     expect(
-      (await store.record(legacy.key).get(db))!.containsKey('pinnedByShim'),
+      (await raw.record(legacy.key).get(db))!.containsKey('pinnedByShim'),
       isFalse,
     );
   });
@@ -591,7 +594,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
       );
 
@@ -624,7 +627,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
       );
 
@@ -657,7 +660,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
         canSignFor: (pubkey) => pubkey == bob,
       );
@@ -690,7 +693,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
         canSignFor: (_) => loggedIn,
       );
@@ -725,7 +728,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(milliseconds: 1),
         canSignFor: (_) => false,
       );
@@ -752,7 +755,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(seconds: 30),
       );
 
@@ -787,7 +790,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(seconds: 30),
       );
 
@@ -825,7 +828,7 @@ void main() {
         final outbox = OfflineBlossomUpload(
           uploadFn: fake.fn,
           cache: cache,
-          db: db,
+          store: store,
           initialBackoff: const Duration(seconds: 30),
         );
 
@@ -862,7 +865,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(seconds: 30),
       );
 
@@ -890,7 +893,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(seconds: 30),
       );
 
@@ -922,7 +925,7 @@ void main() {
       final outbox = OfflineBlossomUpload(
         uploadFn: fake.fn,
         cache: cache,
-        db: db,
+        store: store,
         initialBackoff: const Duration(seconds: 30),
       );
 

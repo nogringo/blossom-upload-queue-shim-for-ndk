@@ -8,9 +8,10 @@ per-server results. If every server is unreachable (flaky network, app
 backgrounded, process killed mid-upload), the blob is gone from the caller's
 perspective. This shim sits in front of `ndk.blossom.uploadBlob` and adds:
 
-- **Local persistence first.** The queue entry is committed to a sembast store
-  and the bytes are pinned in a [`blossom_cache`](https://pub.dev/packages/blossom_cache)
-  before any network attempt. `upload()` returns once persistence is durable;
+- **Local persistence first.** The queue entry is committed to a pluggable
+  [queue store](#queue-storage) and the bytes are pinned in a
+  [`blossom_cache`](https://pub.dev/packages/blossom_cache) before any network
+  attempt. `upload()` returns once persistence is durable;
   delivery happens in the background and survives restarts.
 - **100 % delivery guarantee.** An entry is only marked `delivered` once
   *every* targeted server has returned `success: true`. Partial success keeps
@@ -25,11 +26,11 @@ perspective. This shim sits in front of `ndk.blossom.uploadBlob` and adds:
 
 ```yaml
 dependencies:
-  blossom_upload_queue_shim_for_ndk: ^0.7.1
-  blossom_cache: ^0.4.0
-  ndk: '>=0.9.0 <0.11.0'
-  sembast: ^3.8.7
+  blossom_upload_queue_shim_for_ndk: ^0.10.0
+  blossom_cache: ^0.5.0
+  ndk: ^0.10.0-dev.7
   idb_shim: ^2.9.2
+  sembast: ^3.8.7 # only to use SembastUploadQueueStore
 ```
 
 ## Quick start
@@ -39,19 +40,21 @@ import 'dart:typed_data';
 
 import 'package:blossom_cache/blossom_cache.dart';
 import 'package:blossom_upload_queue_shim_for_ndk/blossom_upload_queue_shim_for_ndk.dart';
+import 'package:blossom_upload_queue_shim_for_ndk/sembast_store.dart';
 import 'package:idb_shim/idb_io.dart';
 import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_io.dart';
 
 Future<void> main() async {
   final db = await databaseFactoryIo.openDatabase('blossom_uploads.db');
+  final store = SembastUploadQueueStore(db);
   final cache = await IdbBlossomCache.open(factory: idbFactorySembastIo);
 
   final ndk = Ndk(
     NdkConfig(eventVerifier: Bip340EventVerifier(), cache: MemCacheManager()),
   );
 
-  final outbox = OfflineBlossomUpload.withNdk(ndk, cache: cache, db: db);
+  final outbox = OfflineBlossomUpload.withNdk(ndk, cache: cache, store: store);
   outbox.start();
 
   // Bytes go in the cache first, with a caller-supplied sha256.
@@ -65,6 +68,31 @@ Future<void> main() async {
   );
 }
 ```
+
+## Queue storage
+
+The shim keeps its queue metadata in an `UploadQueueStore`. Blob bytes stay in
+the `BlossomCache`. Two stores ship with the package:
+
+- `SembastUploadQueueStore(db, storeName: 'blob_uploads')`, from
+  `package:blossom_upload_queue_shim_for_ndk/sembast_store.dart`. Open `db`
+  with `sembast_io` on native targets, `sembast_web` in the browser, or
+  `sembast_sqflite` on top of SQLite. Several queues can share one database
+  under different store names.
+- `InMemoryUploadQueueStore()`, which loses everything on restart. Use it in
+  tests, or as a starting point for your own store.
+
+To keep the queue in your app's own database, implement `UploadQueueStore`.
+`QueuedBlobUpload.toMap()` and `QueuedBlobUpload.fromMap()` give a
+JSON-compatible form of each record. The shim relies on three guarantees:
+
+- `update()` is atomic: no other write to the same key may interleave between
+  the read and the write.
+- `watch()` and `watchPending()` emit the current state on listen, then after
+  every change.
+- `name` stays stable across restarts. The shim pins pending blobs under a
+  holder derived from it, so renaming a queue orphans those pins, and two
+  queues sharing a cache need distinct names.
 
 ## Semantics
 
@@ -110,7 +138,7 @@ constructor:
 OfflineBlossomUpload(
   uploadFn: ...,
   cache: cache,
-  db: db,
+  store: store,
   onlineSignal: yourConnectivityStream, // true while online, false otherwise
 );
 ```
@@ -164,10 +192,10 @@ Blob bytes stay in the cache either way; only shim-owned pins are released.
 
 The shim pins the blob in the `BlossomCache` while an upload is pending and
 releases the pin on `delivered`. It pins under its own holder,
-`blossom_upload_queue_shim:<storeName>`, suffixed with `:<pubkey>` for
-account-bound entries, so each record owns exactly one pin. **It never touches
-pins held by anyone else**: pin the blob yourself, before or after `upload()`,
-and your pin survives delivery.
+`blossom_upload_queue_shim:<name>` where `<name>` is the store's `name`,
+suffixed with `:<pubkey>` for account-bound entries, so each record owns
+exactly one pin. **It never touches pins held by anyone else**: pin the blob
+yourself, before or after `upload()`, and your pin survives delivery.
 
 A blob whose bytes are deleted from the cache while still pending will have
 its next attempt fail with `lastErrors[server] = 'blob bytes missing from
@@ -192,7 +220,7 @@ introduce server-to-server dependencies that complicate the model.
   would re-encode the blob server-side and change the resulting sha256,
   breaking content-addressing. Hardcoded `false`.
 - **It never deletes records on its own.** Even after full delivery, the entry
-  stays in the database until you call one of the `clear*` methods.
+  stays in the store until you call one of the `clear*` methods.
 - **It does not give up.** Without a `maxAttempts` knob, a deterministically
   rejected upload (size too big for the server, blob type not allowed, etc.)
   will retry forever with exponential backoff. Inspect
@@ -204,8 +232,7 @@ introduce server-to-server dependencies that complicate the model.
 OfflineBlossomUpload.withNdk(
   ndk,
   cache: cache,
-  db: db,
-  storeName: 'blob_uploads',                     // sembast store name
+  store: SembastUploadQueueStore(db, storeName: 'blob_uploads'),
   tickInterval: const Duration(seconds: 30),     // periodic retry scan
   initialBackoff: const Duration(seconds: 5),    // backoff floor
   maxBackoff: const Duration(minutes: 30),       // backoff ceiling
@@ -215,8 +242,8 @@ OfflineBlossomUpload.withNdk(
 
 ## Testing your integration
 
-`OfflineBlossomUpload` is fully unit-testable without NDK. Pass a custom
-`BlobUploadFn` to the default constructor:
+`OfflineBlossomUpload` is fully unit-testable without NDK or a database. Pass
+a custom `BlobUploadFn` to the default constructor:
 
 ```dart
 final outbox = OfflineBlossomUpload(
@@ -232,12 +259,15 @@ final outbox = OfflineBlossomUpload(
           BlobUploadResult(serverUrl: s, success: true),
       ],
   cache: await IdbBlossomCache.open(factory: newIdbFactoryMemory()),
-  db: await newDatabaseFactoryMemory().openDatabase('test.db'),
+  store: InMemoryUploadQueueStore(),
 );
 ```
 
-The package's own test suite uses exactly this approach; see
+The package's own test suite uses this approach; see
 [`test/offline_blossom_upload_test.dart`](test/offline_blossom_upload_test.dart).
+[`test/upload_queue_store_test.dart`](test/upload_queue_store_test.dart) checks
+both stores against the contract above, and is a good template to test your
+own.
 
 ## License
 
