@@ -9,6 +9,7 @@ import 'backoff.dart';
 import 'legacy_pinned_records.dart';
 import 'public_host_filter.dart';
 import 'queued_blob_upload.dart';
+import 'sync_report.dart';
 import 'upload_queue_store.dart';
 
 /// Function that hands a blob off to the network. Matches the call pattern of
@@ -41,9 +42,11 @@ typedef CanSignForFn = bool Function(String pubkey);
 /// Offline-first wrapper around NDK's Blossom upload.
 ///
 /// Contract:
-///  - `upload(sha256: ..., servers: [...])` persists the queue entry in the
-///    [UploadQueueStore] before returning. The blob bytes must already live in the caller-provided
-///    [BlossomCache]; the shim pins them while delivery is pending.
+///  - `upload(sha256: ..., servers: [...])` and `enqueue(...)` persist the
+///    queue entry in the [UploadQueueStore] before returning; only `upload`
+///    attempts it right away. The blob bytes must already live in the
+///    caller-provided [BlossomCache]; the shim pins them while delivery is
+///    pending.
 ///  - Delivery is guaranteed in the eventual sense: the shim keeps retrying
 ///    each `pending` entry until every server in [QueuedBlobUpload.servers]
 ///    has acknowledged it.
@@ -203,10 +206,31 @@ class OfflineBlossomUpload {
     );
   }
 
+  /// Same as [enqueue], then fires the first attempt in the background. The
+  /// returned [QueuedBlobUpload] reflects the persisted state, not the attempt
+  /// outcome.
+  Future<QueuedBlobUpload> upload({
+    required String sha256,
+    required List<String> servers,
+    String? contentType,
+    String? pubkey,
+  }) async {
+    final record = await enqueue(
+      sha256: sha256,
+      servers: servers,
+      contentType: contentType,
+      pubkey: pubkey,
+    );
+    unawaited(_attempt(record.key));
+    return record;
+  }
+
   /// Persists a queue entry for the blob identified by [sha256], to be
-  /// delivered to every URL in [servers], then fires the first attempt in
-  /// the background. The returned [QueuedBlobUpload] reflects the persisted
-  /// state, not the attempt outcome.
+  /// delivered to every URL in [servers], without attempting it.
+  ///
+  /// The entry is due at once, so the next periodic tick, [retryNow] or [sync]
+  /// sends it. Without [start] only the last two do, which suits apps that
+  /// send on demand, such as a CLI with a `sync` command.
   ///
   /// The blob must already live in the [BlossomCache] passed to the
   /// constructor; the shim looks it up via `cache.head(sha256)` and throws
@@ -222,9 +246,8 @@ class OfflineBlossomUpload {
   /// behaviour, where the signer is resolved at attempt time.
   ///
   /// If a record with the same [sha256] and [pubkey] already exists, its target
-  /// servers are merged with [servers] and it is rescheduled for an immediate
-  /// attempt.
-  Future<QueuedBlobUpload> upload({
+  /// servers are merged with [servers] and it becomes due at once.
+  Future<QueuedBlobUpload> enqueue({
     required String sha256,
     required List<String> servers,
     String? contentType,
@@ -280,8 +303,6 @@ class OfflineBlossomUpload {
       );
     }
     await _store.put(record);
-
-    unawaited(_attempt(record.key));
     return record;
   }
 
@@ -341,6 +362,54 @@ class OfflineBlossomUpload {
   Future<void> retryNow() async {
     _ensureNotDisposed();
     await _tick();
+  }
+
+  /// Attempts every undelivered entry once, ignoring the backoff and the
+  /// online signal, and completes when every attempt has finished.
+  ///
+  /// Meant for user-triggered syncs, paired with [enqueue]. Entries awaiting a
+  /// [reupload] are included, and an attempt already in flight is awaited
+  /// rather than duplicated. At most [concurrency] entries are attempted at
+  /// once, since each attempt loads its blob into memory. Narrowed to
+  /// [pubkey]'s entries when given.
+  Future<SyncReport> sync({String? pubkey, int concurrency = 4}) async {
+    _ensureNotDisposed();
+    if (concurrency < 1) {
+      throw ArgumentError.value(concurrency, 'concurrency', 'must be >= 1');
+    }
+    await _legacyPinsMigrated;
+    final candidates = pubkey == null
+        ? await _store.findAll()
+        : await _store.findByPubkey(pubkey);
+    final queued =
+        candidates
+            .where((r) => r.deliveredAt == null || r.forcedServers != null)
+            .toList()
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final attempted = queued.where(_canSign).toList(growable: false);
+
+    final keys = attempted.map((r) => r.key).iterator;
+    Future<void> drain() async {
+      while (keys.moveNext()) {
+        final key = keys.current;
+        await (_inFlight[key] ?? _attempt(key));
+      }
+    }
+
+    await Future.wait([for (var i = 0; i < concurrency; i++) drain()]);
+
+    final delivered = <QueuedBlobUpload>[];
+    final failed = <QueuedBlobUpload>[];
+    for (final record in attempted) {
+      final current = await _store.get(record.key);
+      if (current == null) continue;
+      (current.deliveredAt != null ? delivered : failed).add(current);
+    }
+    return SyncReport(
+      delivered: delivered,
+      failed: failed,
+      skipped: queued.where((r) => !_canSign(r)).toList(growable: false),
+    );
   }
 
   /// Returns the currently persisted record for [sha256] under [pubkey], or
@@ -460,7 +529,7 @@ class OfflineBlossomUpload {
       // Signing as the wrong account is worse than not uploading at all: NDK
       // would silently fall back to a throwaway keypair. Leave the record
       // untouched so it is retried once the account can sign again.
-      if (pubkey != null && !(_canSignFor?.call(pubkey) ?? true)) return;
+      if (!_canSign(record)) return;
 
       final targets = record.forcedServers ?? record.remainingServers;
       if (targets.isEmpty) {
@@ -575,6 +644,11 @@ class OfflineBlossomUpload {
       _inFlight.remove(key);
       completer.complete();
     }
+  }
+
+  bool _canSign(QueuedBlobUpload record) {
+    final pubkey = record.pubkey;
+    return pubkey == null || (_canSignFor?.call(pubkey) ?? true);
   }
 
   /// One holder per account, so each record owns exactly one pin on its blob

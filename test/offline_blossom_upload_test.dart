@@ -937,4 +937,213 @@ void main() {
       await outbox.dispose();
     });
   });
+
+  group('enqueue and sync', () {
+    const alice = 'alice-pubkey';
+    const bob = 'bob-pubkey';
+
+    test('enqueue persists and pins without attempting', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        store: store,
+      );
+
+      final record = await outbox.enqueue(
+        sha256: _sha,
+        servers: const ['https://a'],
+      );
+      await Future.delayed(const Duration(milliseconds: 20));
+
+      expect(record.status, BlobUploadStatus.pending);
+      expect(fake.calls, isEmpty);
+      expect((await outbox.get(_sha))!.attempts, 0);
+      expect((await cache.head(_sha))!.pinnedBy, [_shimHolder]);
+
+      await outbox.dispose();
+    });
+
+    test('sync delivers enqueued entries and reports them', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        store: store,
+      );
+
+      await outbox.enqueue(sha256: _sha, servers: const ['https://a']);
+      final report = await outbox.sync();
+
+      expect(report.delivered.single.sha256, _sha);
+      expect(report.failed, isEmpty);
+      expect(report.skipped, isEmpty);
+      expect((await cache.head(_sha))!.pinned, isFalse);
+
+      final again = await outbox.sync();
+      expect(again.delivered, isEmpty, reason: 'delivered entries are done');
+      expect(fake.calls.length, 1);
+
+      await outbox.dispose();
+    });
+
+    test('sync ignores the backoff', () async {
+      final fake = FakeUploader();
+      fake.fail('https://a');
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        store: store,
+        initialBackoff: const Duration(minutes: 5),
+      );
+
+      await outbox.enqueue(sha256: _sha, servers: const ['https://a']);
+      final first = await outbox.sync();
+      expect(first.failed.single.lastErrors['https://a'], 'connection refused');
+
+      fake.ackAll(['https://a']);
+      final second = await outbox.sync();
+      expect(second.delivered.single.sha256, _sha);
+      expect(fake.calls.length, 2);
+
+      await outbox.dispose();
+    });
+
+    test('sync skips entries whose account cannot sign', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        store: store,
+        canSignFor: (pubkey) => pubkey == bob,
+      );
+
+      await outbox.enqueue(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.enqueue(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: bob,
+      );
+      final report = await outbox.sync();
+
+      expect(report.delivered.single.pubkey, bob);
+      expect(report.skipped.single.pubkey, alice);
+      expect(report.skipped.single.attempts, 0);
+      expect(fake.calls.single.pubkey, bob);
+
+      await outbox.dispose();
+    });
+
+    test('sync(pubkey:) only attempts that account', () async {
+      final fake = FakeUploader();
+      fake.ackAll(['https://a']);
+      final outbox = OfflineBlossomUpload(
+        uploadFn: fake.fn,
+        cache: cache,
+        store: store,
+      );
+
+      await outbox.enqueue(
+        sha256: _sha,
+        servers: const ['https://a'],
+        pubkey: alice,
+      );
+      await outbox.enqueue(sha256: _sha, servers: const ['https://a']);
+      final report = await outbox.sync(pubkey: alice);
+
+      expect(report.delivered.single.pubkey, alice);
+      expect((await outbox.get(_sha))!.status, BlobUploadStatus.pending);
+
+      await outbox.dispose();
+    });
+
+    test('sync keeps at most `concurrency` attempts in flight', () async {
+      var active = 0;
+      var peak = 0;
+      final outbox = OfflineBlossomUpload(
+        uploadFn:
+            ({
+              required data,
+              required serverUrls,
+              required precomputedSha256,
+              contentType,
+              pubkey,
+            }) async {
+              if (++active > peak) peak = active;
+              await Future.delayed(const Duration(milliseconds: 5));
+              active--;
+              return [
+                for (final s in serverUrls)
+                  BlobUploadResult(serverUrl: s, success: true),
+              ];
+            },
+        cache: cache,
+        store: store,
+      );
+
+      for (var i = 0; i < 6; i++) {
+        final sha = '$i' * 64;
+        await cache.put(_bytes(), sha256: sha);
+        await outbox.enqueue(sha256: sha, servers: const ['https://a']);
+      }
+      final report = await outbox.sync(concurrency: 2);
+
+      expect(report.delivered.length, 6);
+      expect(peak, 2);
+
+      await outbox.dispose();
+    });
+
+    test('sync waits for an attempt already in flight', () async {
+      final gate = Completer<void>();
+      var calls = 0;
+      final outbox = OfflineBlossomUpload(
+        uploadFn:
+            ({
+              required data,
+              required serverUrls,
+              required precomputedSha256,
+              contentType,
+              pubkey,
+            }) async {
+              calls++;
+              await gate.future;
+              return [
+                for (final s in serverUrls)
+                  BlobUploadResult(serverUrl: s, success: true),
+              ];
+            },
+        cache: cache,
+        store: store,
+      );
+
+      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      final syncing = outbox.sync();
+      await Future.delayed(const Duration(milliseconds: 20));
+      gate.complete();
+      final report = await syncing;
+
+      expect(report.delivered.single.sha256, _sha);
+      expect(calls, 1, reason: 'joining must not start a duplicate push');
+
+      await outbox.dispose();
+    });
+
+    test('sync rejects a concurrency below 1', () async {
+      final outbox = OfflineBlossomUpload(
+        uploadFn: FakeUploader().fn,
+        cache: cache,
+        store: store,
+      );
+      expect(() => outbox.sync(concurrency: 0), throwsArgumentError);
+      await outbox.dispose();
+    });
+  });
 }

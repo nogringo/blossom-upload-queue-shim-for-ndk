@@ -10,6 +10,11 @@
   `store: SembastUploadQueueStore(db, storeName: name)`. Existing databases and
   pins carry over unchanged.
 - Add `InMemoryUploadQueueStore`, for tests or as a reference implementation.
+- Add `enqueue()`, which persists a queue entry like `upload()` without
+  attempting it, for apps that only send on demand.
+- Add `sync()`, which attempts every undelivered entry once regardless of the
+  backoff, waits for the outcome and returns a `SyncReport` of delivered,
+  failed and skipped entries.
 
 ## 0.9.0
 

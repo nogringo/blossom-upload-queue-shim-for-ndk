@@ -116,10 +116,54 @@ If no `contentType` is provided, the shim reads it from the cache descriptor.
 [Account binding](#account-binding). Leave it out and the entry behaves exactly
 as it did before 0.5.0.
 
+### `enqueue(sha256:, servers:, contentType:, pubkey:)`
+
+Same as `upload()`, without the immediate attempt. The entry is due at once, so
+the next periodic tick, `retryNow()` or `sync()` sends it. Without `start()`,
+only `retryNow()` and `sync()` do: see [Sending on demand](#sending-on-demand).
+
 ### `retryNow()`
 
 Forces an immediate scan of due entries, bypassing the online check. Use it as
-an explicit override (e.g. when the user pulls to refresh).
+an explicit override (e.g. when the user pulls to refresh). Entries waiting out
+their backoff are left for later; use `sync()` to attempt them too.
+
+### `sync({String? pubkey, int concurrency = 4})`
+
+Attempts every undelivered entry once, plus those awaiting a `reupload()`,
+ignoring both the backoff and the online check. Unlike `retryNow()`, it
+completes only when every attempt has finished, and returns a `SyncReport`:
+
+- `delivered`: every targeted server has acked.
+- `failed`: attempted, but at least one server still owes an ack. See
+  `lastErrors`.
+- `skipped`: not attempted, because the entry's account cannot sign right now.
+
+At most `concurrency` entries are attempted at once, since each attempt loads
+its blob into memory. An attempt already in flight is awaited, not duplicated.
+Pass `pubkey` to sync one account's entries only.
+
+### Sending on demand
+
+An app that only sends when asked, such as a CLI with `add` and `sync`
+commands, never calls `start()`. Each command is a short-lived process:
+
+```dart
+// mycli add photo.png
+await cache.put(bytes, sha256: sha, type: 'image/png');
+await outbox.enqueue(sha256: sha, servers: servers, pubkey: pubkey);
+await outbox.dispose();
+
+// mycli sync
+final report = await outbox.sync();
+for (final entry in report.failed) {
+  print('${entry.sha256}: ${entry.lastErrors}');
+}
+await outbox.dispose();
+```
+
+With `withNdk`, an account-bound entry ends up in `skipped` unless its account
+is logged in to `ndk` with a signer when `sync()` runs.
 
 ### Connectivity awareness
 

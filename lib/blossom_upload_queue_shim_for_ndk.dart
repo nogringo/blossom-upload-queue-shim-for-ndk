@@ -12,4 +12,5 @@ export 'src/offline_blossom_upload.dart'
     show BlobUploadFn, CanSignForFn, OfflineBlossomUpload;
 export 'src/in_memory_upload_queue_store.dart' show InMemoryUploadQueueStore;
 export 'src/queued_blob_upload.dart' show BlobUploadStatus, QueuedBlobUpload;
+export 'src/sync_report.dart' show SyncReport;
 export 'src/upload_queue_store.dart' show UploadQueueStore;
