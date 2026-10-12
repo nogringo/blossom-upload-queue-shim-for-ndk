@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:blossom_cache/blossom_cache.dart';
 import 'package:ndk/ndk.dart';
+import 'package:url_set_for_ndk/url_set_for_ndk.dart';
 
 import 'backoff.dart';
 import 'legacy_pinned_records.dart';
@@ -42,7 +44,7 @@ typedef CanSignForFn = bool Function(String pubkey);
 /// Offline-first wrapper around NDK's Blossom upload.
 ///
 /// Contract:
-///  - `upload(sha256: ..., servers: [...])` and `enqueue(...)` persist the
+///  - `upload(sha256: ..., serverSet: ...)` and `enqueue(...)` persist the
 ///    queue entry in the [UploadQueueStore] before returning; only `upload`
 ///    attempts it right away. The blob bytes must already live in the
 ///    caller-provided [BlossomCache]; the shim pins them while delivery is
@@ -68,6 +70,7 @@ class OfflineBlossomUpload {
   final int Function() _now;
   final Stream<bool>? _onlineSignal;
   final CanSignForFn? _canSignFor;
+  final UrlListFn? _serverListFn;
   final String _pinHolder;
 
   Timer? _tickTimer;
@@ -75,6 +78,7 @@ class OfflineBlossomUpload {
   bool _isOnline = true;
   final Map<String, Future<void>> _inFlight = <String, Future<void>>{};
   bool _disposed = false;
+  final Completer<void> _disposal = Completer<void>();
   late final Future<void> _legacyPinsMigrated = _migrateLegacyPins();
 
   OfflineBlossomUpload._({
@@ -87,10 +91,12 @@ class OfflineBlossomUpload {
     required Duration perAttemptTimeout,
     Stream<bool>? onlineSignal,
     CanSignForFn? canSignFor,
+    UrlListFn? serverListFn,
     Random? random,
     int Function()? now,
   }) : _uploadFn = uploadFn,
        _canSignFor = canSignFor,
+       _serverListFn = serverListFn,
        _cache = cache,
        _store = store,
        _pinHolder = 'blossom_upload_queue_shim:${store.name}',
@@ -115,6 +121,9 @@ class OfflineBlossomUpload {
   /// an entry whose `pubkey` is set may be attempted right now. Without it the
   /// shim attempts every due entry and leaves the identity question entirely
   /// to [uploadFn].
+  ///
+  /// Pass [serverListFn] to queue entries whose `serverSet` needs a lookup,
+  /// such as [UrlSet.blossom]. The worker calls it, never [enqueue].
   factory OfflineBlossomUpload({
     required BlobUploadFn uploadFn,
     required BlossomCache cache,
@@ -125,6 +134,7 @@ class OfflineBlossomUpload {
     Duration perAttemptTimeout = const Duration(minutes: 5),
     Stream<bool>? onlineSignal,
     CanSignForFn? canSignFor,
+    UrlListFn? serverListFn,
     Random? random,
     int Function()? now,
   }) {
@@ -138,6 +148,7 @@ class OfflineBlossomUpload {
       perAttemptTimeout: perAttemptTimeout,
       onlineSignal: onlineSignal,
       canSignFor: canSignFor,
+      serverListFn: serverListFn,
       random: random,
       now: now,
     );
@@ -160,6 +171,11 @@ class OfflineBlossomUpload {
   /// account can no longer sign (logged out, or read-only), the entry is
   /// deferred rather than failed: NDK would otherwise throw
   /// `BlossomAuthUnavailableException` and burn an attempt.
+  ///
+  /// A `serverSet` that needs a lookup reads kind 10063 through [ndk], cache
+  /// first, on the owner's NIP-65 write relays and
+  /// [serverListDiscoveryRelays]. [serverListQueryTimeout] bounds each query
+  /// and defaults to NDK's query timeout.
   factory OfflineBlossomUpload.withNdk(
     Ndk ndk, {
     required BlossomCache cache,
@@ -168,6 +184,8 @@ class OfflineBlossomUpload {
     Duration initialBackoff = const Duration(seconds: 5),
     Duration maxBackoff = const Duration(minutes: 30),
     Duration perAttemptTimeout = const Duration(minutes: 5),
+    Iterable<String> serverListDiscoveryRelays = defaultIndexerRelays,
+    Duration? serverListQueryTimeout,
   }) {
     final onlineSignal = ndk.connectivity.relayConnectivityChanges
         .map(
@@ -196,6 +214,11 @@ class OfflineBlossomUpload {
           ),
       canSignFor: (pubkey) =>
           ndk.accounts.accounts[pubkey]?.signer.canSign() ?? false,
+      serverListFn: ndkUrlListFn(
+        ndk,
+        discoveryRelays: serverListDiscoveryRelays,
+        queryTimeout: serverListQueryTimeout,
+      ),
       cache: cache,
       store: store,
       tickInterval: tickInterval,
@@ -211,13 +234,13 @@ class OfflineBlossomUpload {
   /// outcome.
   Future<QueuedBlobUpload> upload({
     required String sha256,
-    required List<String> servers,
+    required UrlSet serverSet,
     String? contentType,
     String? pubkey,
   }) async {
     final record = await enqueue(
       sha256: sha256,
-      servers: servers,
+      serverSet: serverSet,
       contentType: contentType,
       pubkey: pubkey,
     );
@@ -226,7 +249,20 @@ class OfflineBlossomUpload {
   }
 
   /// Persists a queue entry for the blob identified by [sha256], to be
-  /// delivered to every URL in [servers], without attempting it.
+  /// delivered to every server [serverSet] resolves to, without attempting it.
+  ///
+  /// [serverSet] lists servers with [UrlSet.explicit], or describes them to
+  /// look up later, such as
+  /// `UrlSet.fallback([UrlSet.blossom(pubkey), UrlSet.explicit(defaults)])`.
+  /// Only Blossom leaves are accepted: a relay leaf throws [ArgumentError], and
+  /// so does a set that needs no lookup but yields no server.
+  ///
+  /// A set that needs a lookup is stored as is and resolved by the worker,
+  /// once: the servers it yields are frozen into [QueuedBlobUpload.servers].
+  /// Until then the entry stays pending, and nothing is uploaded. A lookup
+  /// that is unavailable, or a set that yields no server at all, is retried
+  /// with backoff and reported in [QueuedBlobUpload.resolutionError]. Without
+  /// a `serverListFn`, such a set throws [StateError].
   ///
   /// The entry is due at once, so the next periodic tick, [retryNow] or [sync]
   /// sends it. Without [start] only the last two do, which suits apps that
@@ -245,20 +281,37 @@ class OfflineBlossomUpload {
   /// yields two independent records. Leave it null to keep the pre-0.5.0
   /// behaviour, where the signer is resolved at attempt time.
   ///
-  /// If a record with the same [sha256] and [pubkey] already exists, its target
-  /// servers are merged with [servers] and it becomes due at once.
+  /// If a record with the same [sha256] and [pubkey] already exists, the
+  /// servers [serverSet] lists are merged into it, a set to look up joins its
+  /// pending one, and it becomes due at once.
   Future<QueuedBlobUpload> enqueue({
     required String sha256,
-    required List<String> servers,
+    required UrlSet serverSet,
     String? contentType,
     String? pubkey,
   }) async {
     _ensureNotDisposed();
-    if (servers.isEmpty) {
-      throw ArgumentError.value(servers, 'servers', 'must not be empty');
+    final relayKinds = serverSet.kinds.difference({UrlListKind.blossom});
+    if (relayKinds.isNotEmpty) {
+      throw ArgumentError.value(
+        serverSet,
+        'serverSet',
+        'reads relay lists (${relayKinds.map((k) => k.name).join(', ')})',
+      );
+    }
+    final pendingSet = serverSet.needsLookup ? serverSet : null;
+    if (pendingSet != null && _serverListFn == null) {
+      throw StateError('this serverSet needs a serverListFn to resolve');
+    }
+    final normalizedServers = pendingSet != null
+        ? const <String>[]
+        : _dedupNormalized(
+            (await resolveUrlSet(serverSet, _noLookup) as UrlsResolved).urls,
+          );
+    if (normalizedServers.isEmpty && pendingSet == null) {
+      throw ArgumentError.value(serverSet, 'serverSet', 'has no server');
     }
     await _legacyPinsMigrated;
-    final normalizedServers = _dedupNormalized(servers);
     final now = _now();
 
     final descriptor = await _cache.head(sha256);
@@ -277,13 +330,22 @@ class OfflineBlossomUpload {
         ...existing.servers,
         ...normalizedServers,
       ]);
-      final fullyAcked = mergedServers.every(existing.ackedServers.contains);
+      final pending = existing.pendingServerSet;
+      final mergedSet = pending == null || pendingSet == null
+          ? pending ?? pendingSet
+          : UrlSet.union([pending, pendingSet]);
+      final fullyAcked =
+          mergedSet == null &&
+          mergedServers.every(existing.ackedServers.contains);
       if (!fullyAcked) await _cache.pin(sha256, by: _holderFor(pubkey));
       record = existing.copyWith(
         servers: mergedServers,
         contentType: existing.contentType ?? effectiveContentType,
         nextAttemptAt: now,
         clearDelivered: !fullyAcked,
+        pendingServerSet: mergedSet,
+        resolutionAttempts: pendingSet == null ? null : 0,
+        clearResolutionError: pendingSet != null,
       );
     } else {
       await _cache.pin(sha256, by: _holderFor(pubkey));
@@ -300,6 +362,7 @@ class OfflineBlossomUpload {
         nextAttemptAt: now,
         deliveredAt: null,
         createdAt: now,
+        pendingServerSet: pendingSet,
       );
     }
     await _store.put(record);
@@ -333,7 +396,9 @@ class OfflineBlossomUpload {
     final updated = await _store.update(key, (current) {
       if (server == null) {
         return current.copyWith(
-          forcedServers: List<String>.from(current.servers),
+          forcedServers: current.servers.isEmpty
+              ? null
+              : List<String>.from(current.servers),
           nextAttemptAt: now,
         );
       }
@@ -488,6 +553,7 @@ class OfflineBlossomUpload {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _disposal.complete();
     _tickTimer?.cancel();
     _tickTimer = null;
     await _onlineSub?.cancel();
@@ -533,16 +599,21 @@ class OfflineBlossomUpload {
 
     try {
       await _legacyPinsMigrated;
-      final record = await _store.get(key);
-      if (record == null) return;
-      if (record.deliveredAt != null && record.forcedServers == null) return;
+      final stored = await _store.get(key);
+      if (stored == null) return;
+      if (stored.deliveredAt != null && stored.forcedServers == null) return;
 
-      final sha256 = record.sha256;
-      final pubkey = record.pubkey;
       // Signing as the wrong account is worse than not uploading at all: NDK
       // would silently fall back to a throwaway keypair. Leave the record
       // untouched so it is retried once the account can sign again.
-      if (!_canSign(record)) return;
+      if (!_canSign(stored)) return;
+
+      final record = stored.pendingServerSet == null
+          ? stored
+          : await _resolvePendingServerSet(stored);
+      if (record == null) return;
+      final sha256 = record.sha256;
+      final pubkey = record.pubkey;
 
       final targets = record.forcedServers ?? record.remainingServers;
       if (targets.isEmpty) {
@@ -658,6 +729,79 @@ class OfflineBlossomUpload {
       completer.complete();
     }
   }
+
+  /// Resolves [record]'s pending server set and freezes the result. Returns
+  /// the resolved record, or `null` when the set stays pending: a lookup was
+  /// unavailable, no server came out of it, or `enqueue` changed the set
+  /// meanwhile.
+  Future<QueuedBlobUpload?> _resolvePendingServerSet(
+    QueuedBlobUpload record,
+  ) async {
+    final set = record.pendingServerSet!;
+    final resolution = await Future.any<UrlResolution?>([
+      _resolve(set),
+      _disposal.future.then((_) => null),
+    ]);
+    if (resolution == null) return null;
+
+    final resolvedSet = jsonEncode(set.toMap());
+    final updated = await _store.update(record.key, (current) {
+      final pending = current.pendingServerSet;
+      if (pending == null || jsonEncode(pending.toMap()) != resolvedSet) {
+        return null;
+      }
+      final merged = switch (resolution) {
+        UrlsResolved(:final urls) => _dedupNormalized([
+          ...current.servers,
+          ...urls,
+        ]),
+        UrlsUnavailable() => const <String>[],
+      };
+      if (merged.isEmpty) {
+        final attempts = current.resolutionAttempts + 1;
+        final delay = computeBackoff(
+          attempts: attempts,
+          initial: _initialBackoff,
+          max: _maxBackoff,
+          random: _random,
+        );
+        return current.copyWith(
+          resolutionAttempts: attempts,
+          resolutionError: switch (resolution) {
+            UrlsUnavailable(:final reason) => reason,
+            UrlsResolved() => 'server set resolved to no server',
+          },
+          nextAttemptAt: _now() + delay.inMilliseconds,
+        );
+      }
+      return current.copyWith(
+        servers: merged,
+        clearPendingServerSet: true,
+        resolutionAttempts: 0,
+        clearResolutionError: true,
+      );
+    });
+    if (updated == null || updated.pendingServerSet != null) return null;
+    return updated;
+  }
+
+  Future<UrlResolution> _resolve(UrlSet set) async {
+    final serverListFn = _serverListFn;
+    if (serverListFn == null) {
+      return const UrlsUnavailable('no serverListFn configured');
+    }
+    try {
+      return await resolveUrlSet(set, serverListFn);
+    } catch (e) {
+      return UrlsUnavailable(e.toString());
+    }
+  }
+
+  static Future<UrlListLookup> _noLookup(
+    String _,
+    UrlListKind _,
+    List<String> _,
+  ) => throw StateError('an explicit server set needs no lookup');
 
   bool _canSign(QueuedBlobUpload record) {
     final pubkey = record.pubkey;

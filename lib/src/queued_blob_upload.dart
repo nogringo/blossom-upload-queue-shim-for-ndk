@@ -1,3 +1,5 @@
+import 'package:url_set_for_ndk/url_set_for_ndk.dart';
+
 /// Status of a queued blob upload.
 enum BlobUploadStatus {
   /// At least one targeted server has not acknowledged the upload yet.
@@ -31,9 +33,22 @@ class QueuedBlobUpload {
   /// cache descriptor at `upload()` time when the caller does not provide one.
   final String? contentType;
 
-  /// The list of servers this blob must reach. Fixed at creation, but may grow
-  /// if `reupload(sha, server: ...)` introduces a new server.
+  /// The list of servers this blob must reach. Grows when [pendingServerSet]
+  /// resolves, when `enqueue` merges more servers, or when
+  /// `reupload(sha, server: ...)` introduces a new server.
   final List<String> servers;
+
+  /// Server set still to resolve, or `null` once its servers are frozen into
+  /// [servers]. While non-null the record is [BlobUploadStatus.pending].
+  final UrlSet? pendingServerSet;
+
+  /// Resolutions of [pendingServerSet] that did not conclude since it was set.
+  /// Drives the backoff between them.
+  final int resolutionAttempts;
+
+  /// Why the last resolution of [pendingServerSet] did not produce servers:
+  /// a lookup was unavailable, or the set resolved to no server.
+  final String? resolutionError;
 
   /// Subset of [servers] that have returned `success: true` at least once
   /// across all attempts.
@@ -90,6 +105,9 @@ class QueuedBlobUpload {
     required this.createdAt,
     this.pubkey,
     this.forcedServers,
+    this.pendingServerSet,
+    this.resolutionAttempts = 0,
+    this.resolutionError,
   });
 
   /// The store key for this entry.
@@ -116,7 +134,8 @@ class QueuedBlobUpload {
   ///
   /// Use `clearDelivered: true` to force-clear [deliveredAt] (`null` arg
   /// alone is ambiguous with "leave as-is" for nullable fields). Same idea
-  /// for `clearForcedServers` and `clearContentType`.
+  /// for `clearForcedServers`, `clearContentType`, `clearPendingServerSet`
+  /// and `clearResolutionError`.
   QueuedBlobUpload copyWith({
     String? contentType,
     List<String>? servers,
@@ -128,9 +147,14 @@ class QueuedBlobUpload {
     int? nextAttemptAt,
     int? deliveredAt,
     List<String>? forcedServers,
+    UrlSet? pendingServerSet,
+    int? resolutionAttempts,
+    String? resolutionError,
     bool clearDelivered = false,
     bool clearForcedServers = false,
     bool clearContentType = false,
+    bool clearPendingServerSet = false,
+    bool clearResolutionError = false,
   }) {
     return QueuedBlobUpload(
       sha256: sha256,
@@ -148,6 +172,13 @@ class QueuedBlobUpload {
       forcedServers: clearForcedServers
           ? null
           : (forcedServers ?? this.forcedServers),
+      pendingServerSet: clearPendingServerSet
+          ? null
+          : (pendingServerSet ?? this.pendingServerSet),
+      resolutionAttempts: resolutionAttempts ?? this.resolutionAttempts,
+      resolutionError: clearResolutionError
+          ? null
+          : (resolutionError ?? this.resolutionError),
     );
   }
 
@@ -167,6 +198,9 @@ class QueuedBlobUpload {
       'deliveredAt': deliveredAt,
       'createdAt': createdAt,
       'forcedServers': forcedServers,
+      'pendingServerSet': pendingServerSet?.toMap(),
+      'resolutionAttempts': resolutionAttempts,
+      'resolutionError': resolutionError,
     };
   }
 
@@ -188,6 +222,12 @@ class QueuedBlobUpload {
       deliveredAt: map['deliveredAt'] as int?,
       createdAt: map['createdAt'] as int,
       forcedServers: (map['forcedServers'] as List?)?.cast<String>(),
+      pendingServerSet: switch (map['pendingServerSet']) {
+        final Map set => UrlSet.fromMap(set),
+        _ => null,
+      },
+      resolutionAttempts: map['resolutionAttempts'] as int? ?? 0,
+      resolutionError: map['resolutionError'] as String?,
     );
   }
 }

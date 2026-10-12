@@ -221,7 +221,10 @@ void main() {
       store: InMemoryUploadQueueStore(),
     );
 
-    await outbox.upload(sha256: sha, servers: const ['https://a']);
+    await outbox.upload(
+      sha256: sha,
+      serverSet: const UrlSet.explicit(['https://a']),
+    );
     expect((await cache.head(sha))!.pinnedBy, [
       'blossom_upload_queue_shim:blob_uploads',
     ]);

@@ -1,3 +1,21 @@
+## 0.11.0
+
+- **Breaking:** `upload()` and `enqueue()` take a required `serverSet` instead
+  of `servers`. It is a `UrlSet` from `url_set_for_ndk`, re-exported. Replace
+  `servers: urls` with `serverSet: UrlSet.explicit(urls)`.
+- A `serverSet` can also describe servers instead of listing them.
+  `UrlSet.blossom(pubkey)` reads the account's kind 10063, and
+  `UrlSet.fallback` gives default servers when it has none. A set that needs a
+  lookup is stored as is and resolved once by the worker, offline included.
+  Relay leaves such as `UrlSet.dm` are rejected.
+- Blank URLs no longer count as servers: a set that yields only blank ones is
+  rejected like an empty one.
+- `withNdk` resolves server sets through NDK, configurable with
+  `serverListDiscoveryRelays` and `serverListQueryTimeout`. The default
+  constructor takes a `serverListFn`.
+- `QueuedBlobUpload` gains `pendingServerSet`, `resolutionAttempts` and
+  `resolutionError`. Records stored by earlier versions load unchanged.
+
 ## 0.10.0
 
 - **Breaking:** queue storage is pluggable, so sembast is no longer required.

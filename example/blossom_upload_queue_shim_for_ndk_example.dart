@@ -39,10 +39,10 @@ Future<void> main() async {
   //    delivery happens in the background and survives restarts.
   await outbox.upload(
     sha256: sha,
-    servers: const [
+    serverSet: const UrlSet.explicit([
       'https://blossom.primal.net',
       'https://cdn.satellite.earth',
-    ],
+    ]),
   );
 
   // 7. When connectivity comes back, ask for an immediate retry pass.

@@ -64,6 +64,35 @@ void main() {
       expect(restored.forcedServers, original.forcedServers);
     });
 
+    test('toMap → fromMap roundtrip keeps the pending server set', () {
+      final original = _base(servers: const []).copyWith(
+        pendingServerSet: const UrlSet.fallback([
+          UrlSet.blossom('p'),
+          UrlSet.explicit(['https://default']),
+        ]),
+        resolutionAttempts: 3,
+        resolutionError: 'offline',
+      );
+      final restored = QueuedBlobUpload.fromMap(original.toMap());
+      expect(
+        restored.pendingServerSet!.toMap(),
+        original.pendingServerSet!.toMap(),
+      );
+      expect(restored.resolutionAttempts, 3);
+      expect(restored.resolutionError, 'offline');
+    });
+
+    test('fromMap reads records stored before server sets', () {
+      final map = _base().toMap()
+        ..remove('pendingServerSet')
+        ..remove('resolutionAttempts')
+        ..remove('resolutionError');
+      final restored = QueuedBlobUpload.fromMap(map);
+      expect(restored.pendingServerSet, isNull);
+      expect(restored.resolutionAttempts, 0);
+      expect(restored.resolutionError, isNull);
+    });
+
     test('copyWith clearDelivered forces null even when arg is non-null', () {
       final delivered = _base(deliveredAt: 42);
       final cleared = delivered.copyWith(clearDelivered: true);

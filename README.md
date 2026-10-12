@@ -26,7 +26,7 @@ perspective. This shim sits in front of `ndk.blossom.uploadBlob` and adds:
 
 ```yaml
 dependencies:
-  blossom_upload_queue_shim_for_ndk: ^0.10.0
+  blossom_upload_queue_shim_for_ndk: ^0.11.0
   blossom_cache: ^0.5.0
   ndk: ^0.10.0-dev.7
   idb_shim: ^2.9.2
@@ -64,7 +64,10 @@ Future<void> main() async {
   // shim's responsibility.
   await outbox.upload(
     sha256: mySha256,
-    servers: const ['https://blossom.primal.net', 'https://cdn.satellite.earth'],
+    serverSet: const UrlSet.explicit([
+      'https://blossom.primal.net',
+      'https://cdn.satellite.earth',
+    ]),
   );
 }
 ```
@@ -96,19 +99,21 @@ JSON-compatible form of each record. The shim relies on three guarantees:
 
 ## Semantics
 
-### `upload(sha256:, servers:, contentType:, pubkey:)`
+### `upload(sha256:, serverSet:, contentType:, pubkey:)`
 
 Persists a queue entry for the blob identified by `sha256` and schedules an
-immediate attempt to push it to every URL in `servers`. The blob bytes must
-already live in the `BlossomCache` passed to the constructor. `upload()`
-looks them up via `cache.head(sha256)` and throws `StateError` if absent. The
-`servers` list is **required**; no automatic server-list lookup is performed.
-URLs are normalized (lowercased, trailing `/` stripped) before storage.
+immediate attempt to push it to every server `serverSet` resolves to. List
+them with `UrlSet.explicit([...])`, or describe them: see
+[Server sets](#server-sets). The blob bytes must already live in the
+`BlossomCache` passed to the constructor. `upload()` looks them up via
+`cache.head(sha256)` and throws `StateError` if absent. URLs are normalized
+(lowercased, trailing `/` stripped) before storage.
 
 If a record with the same `sha256` **and** `pubkey` already exists, the server
 lists are merged. `deliveredAt` is preserved if every server in the merged list
 is already in the entry's ack set; otherwise the entry is demoted to pending so
-the missing servers get pushed.
+the missing servers get pushed. A `serverSet` still to look up always demotes
+it, until the set resolves.
 
 If no `contentType` is provided, the shim reads it from the cache descriptor.
 
@@ -116,7 +121,7 @@ If no `contentType` is provided, the shim reads it from the cache descriptor.
 [Account binding](#account-binding). Leave it out and the entry behaves exactly
 as it did before 0.5.0.
 
-### `enqueue(sha256:, servers:, contentType:, pubkey:)`
+### `enqueue(sha256:, serverSet:, contentType:, pubkey:)`
 
 Same as `upload()`, without the immediate attempt. The entry is due at once, so
 the next periodic tick, `retryNow()` or `sync()` sends it. Without `start()`,
@@ -136,7 +141,7 @@ completes only when every attempt has finished, and returns a `SyncReport`:
 
 - `delivered`: every targeted server has acked.
 - `failed`: attempted, but at least one server still owes an ack. See
-  `lastErrors`.
+  `lastErrors`, or `resolutionError` while a server set is unresolved.
 - `skipped`: not attempted, because the entry's account cannot sign right now.
 
 At most `concurrency` entries are attempted at once, since each attempt loads
@@ -151,7 +156,11 @@ commands, never calls `start()`. Each command is a short-lived process:
 ```dart
 // mycli add photo.png
 await cache.put(bytes, sha256: sha, type: 'image/png');
-await outbox.enqueue(sha256: sha, servers: servers, pubkey: pubkey);
+await outbox.enqueue(
+  sha256: sha,
+  serverSet: UrlSet.blossom(pubkey),
+  pubkey: pubkey,
+);
 await outbox.dispose();
 
 // mycli sync
@@ -164,6 +173,47 @@ await outbox.dispose();
 
 With `withNdk`, an account-bound entry ends up in `skipped` unless its account
 is logged in to `ndk` with a signer when `sync()` runs.
+
+### Server sets
+
+`serverSet` is a `UrlSet` from
+[`url_set_for_ndk`](https://pub.dev/packages/url_set_for_ndk), re-exported by
+this package. `UrlSet.explicit` lists servers; the other leaves describe them,
+to be looked up later:
+
+```dart
+await outbox.enqueue(
+  sha256: sha,
+  pubkey: pubkey,
+  serverSet: UrlSet.fallback([
+    UrlSet.blossom(pubkey), // the account's kind 10063 (BUD-03)
+    UrlSet.explicit(['https://blossom.primal.net']),
+  ]),
+);
+```
+
+Only Blossom leaves are accepted: `explicit`, `blossom`, `union` and
+`fallback`. A relay leaf such as `UrlSet.dm` throws `ArgumentError`.
+
+A set that needs a lookup is stored as is, so `enqueue()` works offline even
+when the server list was never fetched. The worker resolves it before the
+first upload:
+
+- `withNdk` reads kind 10063 through NDK, cache first, on the owner's NIP-65
+  write relays and `serverListDiscoveryRelays` (default
+  `defaultIndexerRelays`). With the default constructor, pass a
+  `serverListFn`. Without one, a set that needs a lookup throws `StateError`.
+- Resolution runs once. The servers it yields are frozen into
+  `QueuedBlobUpload.servers`; a later change to the list does not move the
+  entry. Use `reupload(sha256, server: ...)` to add a server afterwards.
+- Until then the entry is pending, its blob pinned, and nothing is uploaded.
+  A lookup that is unavailable is retried with backoff, and so is a set that
+  yields no server at all: the account may publish its list later.
+  `QueuedBlobUpload.pendingServerSet` holds the set and `resolutionError`
+  says why it is still pending.
+- `fallback` only moves to the next set when a list is known to be missing or
+  empty. An unavailable lookup stops it, so an offline device never uploads
+  to the defaults while the account's own servers might exist.
 
 ### Connectivity awareness
 

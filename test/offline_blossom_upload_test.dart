@@ -71,6 +71,27 @@ class FakeUploader {
   }
 }
 
+/// Answers kind 10063 lookups from a table, `unavailable` when absent.
+class FakeServerLists {
+  final Map<String, UrlListLookup> answers = {};
+  final List<String> calls = [];
+  Completer<void>? gate;
+
+  void set(String pubkey, UrlListKind kind, UrlListLookup answer) =>
+      answers['${kind.name}|$pubkey'] = answer;
+
+  void servers(String pubkey, List<String> urls) => this
+    ..set(pubkey, UrlListKind.outbox, const UrlListLookup.notFound())
+    ..set(pubkey, UrlListKind.blossom, UrlListLookup.found(urls));
+
+  UrlListFn get fn => (pubkey, kind, outboxRelays) async {
+    final id = '${kind.name}|$pubkey';
+    calls.add(id);
+    await gate?.future;
+    return answers[id] ?? const UrlListLookup.unavailable('offline');
+  };
+}
+
 Future<BlossomCache> _openCache() =>
     IdbBlossomCache.open(factory: newIdbFactoryMemory());
 
@@ -118,7 +139,7 @@ void main() {
 
       final record = await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a', 'https://b'],
+        serverSet: const UrlSet.explicit(['https://a', 'https://b']),
       );
       expect(record.status, BlobUploadStatus.pending);
 
@@ -152,7 +173,7 @@ void main() {
 
     await outbox.upload(
       sha256: _sha,
-      servers: const ['https://a', 'https://b'],
+      serverSet: const UrlSet.explicit(['https://a', 'https://b']),
     );
 
     final pending = await _waitFor(outbox, _sha, (r) => r.attempts >= 1);
@@ -177,7 +198,7 @@ void main() {
 
     await outbox.upload(
       sha256: _sha,
-      servers: const ['https://a', 'https://b'],
+      serverSet: const UrlSet.explicit(['https://a', 'https://b']),
     );
     await _waitFor(outbox, _sha, (r) => r.attempts >= 1);
 
@@ -209,7 +230,7 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a', 'https://b'],
+        serverSet: const UrlSet.explicit(['https://a', 'https://b']),
       );
       final delivered = await _waitFor(
         outbox,
@@ -263,7 +284,10 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       await _waitFor(
         outbox,
         _sha,
@@ -306,7 +330,10 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       final delivered = await _waitFor(
         outbox,
         _sha,
@@ -341,7 +368,7 @@ void main() {
       store: store,
     );
     expect(
-      () => outbox.upload(sha256: _sha, servers: const []),
+      () => outbox.upload(sha256: _sha, serverSet: const UrlSet.explicit([])),
       throwsArgumentError,
     );
     await outbox.dispose();
@@ -355,7 +382,10 @@ void main() {
     );
     final missing = 'b' * 64;
     expect(
-      () => outbox.upload(sha256: missing, servers: const ['https://a']),
+      () => outbox.upload(
+        sha256: missing,
+        serverSet: const UrlSet.explicit(['https://a']),
+      ),
       throwsStateError,
     );
     await outbox.dispose();
@@ -372,10 +402,16 @@ void main() {
       initialBackoff: const Duration(milliseconds: 1),
     );
 
-    await outbox.upload(sha256: _sha, servers: const ['https://a']);
+    await outbox.upload(
+      sha256: _sha,
+      serverSet: const UrlSet.explicit(['https://a']),
+    );
     await _waitFor(outbox, _sha, (r) => r.attempts >= 1);
 
-    await outbox.upload(sha256: _sha, servers: const ['https://b']);
+    await outbox.upload(
+      sha256: _sha,
+      serverSet: const UrlSet.explicit(['https://b']),
+    );
     final merged = await _waitFor(outbox, _sha, (r) => r.servers.length == 2);
     expect(merged.servers, containsAll(['https://a', 'https://b']));
 
@@ -396,7 +432,10 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['HTTPS://Blob.Example/', 'https://blob.example'],
+        serverSet: const UrlSet.explicit([
+          'HTTPS://Blob.Example/',
+          'https://blob.example',
+        ]),
       );
       final r = await _waitFor(outbox, _sha, (r) => r.attempts >= 1);
       expect(r.servers, ['https://blob.example']);
@@ -416,7 +455,10 @@ void main() {
         initialBackoff: const Duration(milliseconds: 1),
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       final r = await _waitFor(outbox, _sha, (r) => r.attempts >= 1);
       expect(r.status, BlobUploadStatus.pending);
       expect(r.lastErrors['https://a'], contains('no signer'));
@@ -433,7 +475,10 @@ void main() {
     );
     await outbox.dispose();
     expect(
-      () => outbox.upload(sha256: _sha, servers: const ['https://a']),
+      () => outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      ),
       throwsStateError,
     );
     expect(() => outbox.remove(_sha), throwsStateError);
@@ -451,7 +496,10 @@ void main() {
         initialBackoff: const Duration(milliseconds: 5),
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       await _waitFor(
         outbox,
         _sha,
@@ -497,7 +545,10 @@ void main() {
     final initial = await cache.head(_sha);
     expect(initial!.pinned, isFalse);
 
-    await outbox.upload(sha256: _sha, servers: const ['https://a']);
+    await outbox.upload(
+      sha256: _sha,
+      serverSet: const UrlSet.explicit(['https://a']),
+    );
     expect((await cache.head(_sha))!.pinnedBy, [_shimHolder]);
 
     await _waitFor(outbox, _sha, (r) => r.status == BlobUploadStatus.delivered);
@@ -519,7 +570,10 @@ void main() {
       initialBackoff: const Duration(milliseconds: 1),
     );
 
-    await outbox.upload(sha256: _sha, servers: const ['https://a']);
+    await outbox.upload(
+      sha256: _sha,
+      serverSet: const UrlSet.explicit(['https://a']),
+    );
     await _waitFor(outbox, _sha, (r) => r.status == BlobUploadStatus.delivered);
     await outbox.dispose();
 
@@ -536,7 +590,10 @@ void main() {
       initialBackoff: const Duration(milliseconds: 1),
     );
 
-    await outbox.upload(sha256: _sha, servers: const ['https://a']);
+    await outbox.upload(
+      sha256: _sha,
+      serverSet: const UrlSet.explicit(['https://a']),
+    );
     await cache.pin(_sha);
     fake.ackAll(['https://a']);
     await outbox.retryNow();
@@ -601,7 +658,7 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
       final delivered = await _waitFor(
@@ -634,12 +691,12 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://b'],
+        serverSet: const UrlSet.explicit(['https://b']),
         pubkey: bob,
       );
 
@@ -668,7 +725,7 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
       await outbox.retryNow();
@@ -701,7 +758,7 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
       await outbox.retryNow();
@@ -734,7 +791,10 @@ void main() {
         canSignFor: (_) => false,
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       await _waitFor(
         outbox,
         _sha,
@@ -762,15 +822,18 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: bob,
       );
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
 
       await outbox.clearLocalAccountData(pubkey: alice);
 
@@ -797,12 +860,12 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: bob,
       );
       expect((await cache.head(_sha))!.pinned, isTrue);
@@ -835,12 +898,12 @@ void main() {
 
         await outbox.upload(
           sha256: _sha,
-          servers: const ['https://b'],
+          serverSet: const UrlSet.explicit(['https://b']),
           pubkey: bob,
         );
         await outbox.upload(
           sha256: _sha,
-          servers: const ['https://a'],
+          serverSet: const UrlSet.explicit(['https://a']),
           pubkey: alice,
         );
 
@@ -872,7 +935,7 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
 
@@ -900,10 +963,13 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
 
       await outbox.clearAllLocalData();
 
@@ -930,7 +996,10 @@ void main() {
         initialBackoff: const Duration(seconds: 30),
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       await outbox.clearAllLocalData();
 
       expect((await cache.head(_sha))!.pinned, isTrue);
@@ -948,7 +1017,10 @@ void main() {
         initialBackoff: const Duration(seconds: 30),
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       await outbox.remove(_sha);
 
       expect(await outbox.get(_sha), isNull);
@@ -970,15 +1042,18 @@ void main() {
 
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
       await outbox.upload(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: bob,
       );
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
 
       await outbox.remove(_sha, pubkey: alice);
 
@@ -1002,7 +1077,10 @@ void main() {
         store: store,
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       await _waitFor(
         outbox,
         _sha,
@@ -1053,7 +1131,10 @@ void main() {
         store: store,
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       await Future.delayed(const Duration(milliseconds: 20));
       await outbox.remove(_sha);
       gate.complete();
@@ -1079,7 +1160,7 @@ void main() {
 
       final record = await outbox.enqueue(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
       );
       await Future.delayed(const Duration(milliseconds: 20));
 
@@ -1100,7 +1181,10 @@ void main() {
         store: store,
       );
 
-      await outbox.enqueue(sha256: _sha, servers: const ['https://a']);
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       final report = await outbox.sync();
 
       expect(report.delivered.single.sha256, _sha);
@@ -1125,7 +1209,10 @@ void main() {
         initialBackoff: const Duration(minutes: 5),
       );
 
-      await outbox.enqueue(sha256: _sha, servers: const ['https://a']);
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       final first = await outbox.sync();
       expect(first.failed.single.lastErrors['https://a'], 'connection refused');
 
@@ -1149,12 +1236,12 @@ void main() {
 
       await outbox.enqueue(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
       await outbox.enqueue(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: bob,
       );
       final report = await outbox.sync();
@@ -1178,10 +1265,13 @@ void main() {
 
       await outbox.enqueue(
         sha256: _sha,
-        servers: const ['https://a'],
+        serverSet: const UrlSet.explicit(['https://a']),
         pubkey: alice,
       );
-      await outbox.enqueue(sha256: _sha, servers: const ['https://a']);
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       final report = await outbox.sync(pubkey: alice);
 
       expect(report.delivered.single.pubkey, alice);
@@ -1217,7 +1307,10 @@ void main() {
       for (var i = 0; i < 6; i++) {
         final sha = '$i' * 64;
         await cache.put(_bytes(), sha256: sha);
-        await outbox.enqueue(sha256: sha, servers: const ['https://a']);
+        await outbox.enqueue(
+          sha256: sha,
+          serverSet: const UrlSet.explicit(['https://a']),
+        );
       }
       final report = await outbox.sync(concurrency: 2);
 
@@ -1250,7 +1343,10 @@ void main() {
         store: store,
       );
 
-      await outbox.upload(sha256: _sha, servers: const ['https://a']);
+      await outbox.upload(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
       final syncing = outbox.sync();
       await Future.delayed(const Duration(milliseconds: 20));
       gate.complete();
@@ -1270,6 +1366,287 @@ void main() {
       );
       expect(() => outbox.sync(concurrency: 0), throwsArgumentError);
       await outbox.dispose();
+    });
+  });
+
+  group('server sets', () {
+    const alice = 'alice-pubkey';
+
+    OfflineBlossomUpload outboxFor(FakeUploader fake, FakeServerLists? lists) =>
+        OfflineBlossomUpload(
+          uploadFn: fake.fn,
+          serverListFn: lists?.fn,
+          cache: cache,
+          store: store,
+          initialBackoff: const Duration(minutes: 5),
+        );
+
+    test('persists unresolved and pinned without a lookup', () async {
+      final lists = FakeServerLists()..gate = Completer<void>();
+      final fake = FakeUploader()..ackAll(['https://a']);
+      final outbox = outboxFor(fake, lists);
+
+      final record = await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.blossom(alice),
+      );
+      expect(record.status, BlobUploadStatus.pending);
+      expect(record.servers, isEmpty);
+      expect(record.pendingServerSet, isA<BlossomUrls>());
+      expect(lists.calls, isEmpty);
+      expect((await cache.head(_sha))!.pinnedBy, [_shimHolder]);
+
+      lists
+        ..servers(alice, ['https://A/'])
+        ..gate!.complete();
+      final report = await outbox.sync();
+      final delivered = report.delivered.single;
+      expect(delivered.servers, ['https://a']);
+      expect(delivered.pendingServerSet, isNull);
+      expect(fake.calls.single.servers, ['https://a']);
+      expect((await cache.head(_sha))!.pinned, isFalse);
+
+      await outbox.dispose();
+    });
+
+    test('an unavailable lookup backs off and is retried', () async {
+      final lists = FakeServerLists();
+      final fake = FakeUploader()..ackAll(['https://a']);
+      final outbox = outboxFor(fake, lists);
+
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.blossom(alice),
+      );
+      final first = await outbox.sync();
+      final waiting = first.failed.single;
+      expect(waiting.resolutionAttempts, 1);
+      expect(waiting.resolutionError, contains('offline'));
+      expect(waiting.attempts, 0);
+      expect(fake.calls, isEmpty);
+
+      lists.servers(alice, ['https://a']);
+      final second = await outbox.sync();
+      final delivered = second.delivered.single;
+      expect(delivered.resolutionAttempts, 0);
+      expect(delivered.resolutionError, isNull);
+
+      await outbox.dispose();
+    });
+
+    test('falls back to default servers without a server list', () async {
+      final lists = FakeServerLists()
+        ..set(alice, UrlListKind.outbox, const UrlListLookup.notFound())
+        ..set(alice, UrlListKind.blossom, const UrlListLookup.notFound());
+      final fake = FakeUploader()..ackAll(['https://default']);
+      final outbox = outboxFor(fake, lists);
+
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.fallback([
+          UrlSet.blossom(alice),
+          UrlSet.explicit(['https://default']),
+        ]),
+      );
+      final report = await outbox.sync();
+      expect(report.delivered.single.servers, ['https://default']);
+
+      await outbox.dispose();
+    });
+
+    test('a set yielding no server stays pending and is retried', () async {
+      final lists = FakeServerLists()
+        ..set(alice, UrlListKind.outbox, const UrlListLookup.notFound())
+        ..set(alice, UrlListKind.blossom, const UrlListLookup.notFound());
+      final fake = FakeUploader()..ackAll(['https://a']);
+      final outbox = outboxFor(fake, lists);
+
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.blossom(alice),
+      );
+      final first = await outbox.sync();
+      expect(
+        first.failed.single.resolutionError,
+        'server set resolved to no server',
+      );
+      expect(first.failed.single.pendingServerSet, isNotNull);
+      expect(fake.calls, isEmpty);
+
+      lists.servers(alice, ['https://a']);
+      final second = await outbox.sync();
+      expect(second.delivered.single.servers, ['https://a']);
+
+      await outbox.dispose();
+    });
+
+    test('freezes servers at the first resolution', () async {
+      final lists = FakeServerLists()..servers(alice, ['https://a']);
+      final fake = FakeUploader()..fail('https://a');
+      final outbox = outboxFor(fake, lists);
+
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.blossom(alice),
+      );
+      await outbox.sync();
+      lists.servers(alice, ['https://b']);
+      final report = await outbox.sync();
+
+      expect(report.failed.single.servers, ['https://a']);
+      expect(fake.calls.map((c) => c.servers), [
+        ['https://a'],
+        ['https://a'],
+      ]);
+      expect(lists.calls, ['outbox|$alice', 'blossom|$alice']);
+
+      await outbox.dispose();
+    });
+
+    test('a union with explicit servers resolves as a whole', () async {
+      final lists = FakeServerLists()
+        ..servers(alice, ['https://b', 'https://a']);
+      final fake = FakeUploader()..ackAll(['https://a', 'https://b']);
+      final outbox = outboxFor(fake, lists);
+
+      final record = await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.union([
+          UrlSet.explicit(['https://a']),
+          UrlSet.blossom(alice),
+        ]),
+      );
+      expect(record.servers, isEmpty);
+
+      final report = await outbox.sync();
+      expect(report.delivered.single.servers, ['https://a', 'https://b']);
+
+      await outbox.dispose();
+    });
+
+    test('a set without lookup resolves at enqueue time', () async {
+      final fake = FakeUploader();
+      final outbox = outboxFor(fake, null);
+
+      final record = await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.fallback([
+          UrlSet.explicit([]),
+          UrlSet.explicit(['https://b']),
+        ]),
+      );
+      expect(record.servers, ['https://b']);
+      expect(record.pendingServerSet, isNull);
+
+      await outbox.dispose();
+    });
+
+    test('a new set on a delivered entry reopens it', () async {
+      final lists = FakeServerLists()..servers(alice, ['https://b']);
+      final fake = FakeUploader()..ackAll(['https://a', 'https://b']);
+      final outbox = outboxFor(fake, lists);
+
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
+      await outbox.sync();
+
+      final reopened = await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.blossom(alice),
+      );
+      expect(reopened.status, BlobUploadStatus.pending);
+      expect((await cache.head(_sha))!.pinnedBy, [_shimHolder]);
+
+      final report = await outbox.sync();
+      final delivered = report.delivered.single;
+      expect(delivered.servers, ['https://a', 'https://b']);
+      expect(fake.calls.last.servers, ['https://b']);
+      expect((await cache.head(_sha))!.pinned, isFalse);
+
+      await outbox.dispose();
+    });
+
+    test('a set already covered by acks delivers without uploading', () async {
+      final lists = FakeServerLists()..servers(alice, ['https://a']);
+      final fake = FakeUploader()..ackAll(['https://a']);
+      final outbox = outboxFor(fake, lists);
+
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.explicit(['https://a']),
+      );
+      await outbox.sync();
+      await outbox.enqueue(
+        sha256: _sha,
+        serverSet: const UrlSet.blossom(alice),
+      );
+      final report = await outbox.sync();
+
+      expect(report.delivered.single.status, BlobUploadStatus.delivered);
+      expect(fake.calls.length, 1);
+
+      await outbox.dispose();
+    });
+
+    test('an unresolved set survives a restart', () async {
+      final fake = FakeUploader()..ackAll(['https://a']);
+      final first = outboxFor(fake, FakeServerLists());
+      await first.enqueue(sha256: _sha, serverSet: const UrlSet.blossom(alice));
+      await first.sync();
+      await first.dispose();
+
+      final second = outboxFor(
+        fake,
+        FakeServerLists()..servers(alice, ['https://a']),
+      );
+      final report = await second.sync();
+      expect(report.delivered.single.servers, ['https://a']);
+
+      await second.dispose();
+    });
+
+    test('dispose abandons a resolution waiting on a lookup', () async {
+      final lists = FakeServerLists()..gate = Completer<void>();
+      final outbox = outboxFor(FakeUploader(), lists);
+
+      await outbox.upload(sha256: _sha, serverSet: const UrlSet.blossom(alice));
+      while (lists.calls.isEmpty) {
+        await Future.delayed(const Duration(milliseconds: 5));
+      }
+      await outbox.dispose().timeout(const Duration(seconds: 1));
+
+      final record = await store.get(_sha);
+      expect(record!.pendingServerSet, isA<BlossomUrls>());
+      expect(record.resolutionAttempts, 0);
+      lists.gate!.complete();
+    });
+
+    test('rejects invalid arguments', () async {
+      final outbox = outboxFor(FakeUploader(), null);
+      await expectLater(
+        outbox.enqueue(sha256: _sha, serverSet: const UrlSet.blossom(alice)),
+        throwsStateError,
+      );
+
+      final withLookup = outboxFor(FakeUploader(), FakeServerLists());
+      for (final serverSet in const [
+        UrlSet.explicit([]),
+        UrlSet.explicit(['', ' /']),
+        UrlSet.fallback([UrlSet.explicit([]), UrlSet.union([])]),
+        UrlSet.dm(alice),
+        UrlSet.fallback([UrlSet.blossom(alice), UrlSet.outbox(alice)]),
+      ]) {
+        await expectLater(
+          withLookup.enqueue(sha256: _sha, serverSet: serverSet),
+          throwsArgumentError,
+        );
+      }
+      expect(await withLookup.listAll(), isEmpty);
+
+      await outbox.dispose();
+      await withLookup.dispose();
     });
   });
 }

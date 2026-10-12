@@ -7,7 +7,8 @@ class SyncReport {
   final List<QueuedBlobUpload> delivered;
 
   /// Entries attempted that still owe an ack to at least one server. The
-  /// reason per server is in [QueuedBlobUpload.lastErrors].
+  /// reason per server is in [QueuedBlobUpload.lastErrors], or in
+  /// [QueuedBlobUpload.resolutionError] while the server set is unresolved.
   final List<QueuedBlobUpload> failed;
 
   /// Entries left untouched because their account cannot sign right now.

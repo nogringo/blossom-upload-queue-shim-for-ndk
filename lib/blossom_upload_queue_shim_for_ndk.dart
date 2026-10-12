@@ -14,3 +14,4 @@ export 'src/in_memory_upload_queue_store.dart' show InMemoryUploadQueueStore;
 export 'src/queued_blob_upload.dart' show BlobUploadStatus, QueuedBlobUpload;
 export 'src/sync_report.dart' show SyncReport;
 export 'src/upload_queue_store.dart' show UploadQueueStore;
+export 'package:url_set_for_ndk/url_set_for_ndk.dart';
