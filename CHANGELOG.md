@@ -1,3 +1,8 @@
+## 0.11.1
+
+- Accept `url_set_for_ndk` 0.2.0 alongside 0.1, so the queue can be used with
+  `sync_engine_shim_for_ndk` 0.9.0. Nothing changed in the code.
+
 ## 0.11.0
 
 - **Breaking:** `upload()` and `enqueue()` take a required `serverSet` instead
